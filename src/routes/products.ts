@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { requireAdmin } from '../middleware/auth';
 import Product from '../models/Product';
 
 const router = Router();
@@ -107,8 +108,8 @@ router.get('/:slug', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// POST /api/products - Create new product (Admin only - will add auth later)
-router.post('/', async (req: Request, res: Response): Promise<void> => {
+// POST /api/products - Create new product (Admin only - JWT required)
+router.post('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const product = new Product(req.body);
     await product.save();
@@ -137,8 +138,8 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// PUT /api/products/:id - Update product (Admin only - will add auth later)
-router.put('/:id', async (req: Request, res: Response): Promise<void> => {
+// PUT /api/products/:id - Update product (Admin only - JWT required)
+router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
 
@@ -171,8 +172,8 @@ router.put('/:id', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// DELETE /api/products/:id - Delete product (Admin only - will add auth later)
-router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
+// DELETE /api/products/:id - Delete product (Admin only - JWT required)
+router.delete('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
 

@@ -1,7 +1,10 @@
 import express, { Application, Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import bcrypt from 'bcryptjs';
 import { connectToDatabase, closeDatabaseConnection } from './config/database';
+import Admin from './models/Admin';
+import authRoutes from './routes/auth';
 import productRoutes from './routes/products';
 import orderRoutes from './routes/orders';
 
@@ -23,11 +26,13 @@ app.get('/', (_req: Request, res: Response) => {
     version: '1.0.0',
     endpoints: {
       products: '/api/products',
-      orders: '/api/orders'
+      orders: '/api/orders',
+      auth: '/api/auth'
     }
   });
 });
 
+app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 
@@ -42,7 +47,23 @@ app.use((_req: Request, res: Response) => {
 // Start server
 const startServer = async () => {
   try {
+    if (!process.env.JWT_SECRET) {
+      console.error('❌ JWT_SECRET is not set in .env');
+      process.exit(1);
+    }
+
     await connectToDatabase();
+
+    // Auto-seed the admin account on first run (ADMIN_EMAIL / ADMIN_PASSWORD in .env)
+    if ((await Admin.countDocuments()) === 0) {
+      if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
+        const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+        await Admin.create({ email: process.env.ADMIN_EMAIL.toLowerCase(), passwordHash });
+        console.log(`🌱 Admin account created: ${process.env.ADMIN_EMAIL}`);
+      } else {
+        console.warn('⚠️  ADMIN_EMAIL / ADMIN_PASSWORD not set in .env — admin login disabled');
+      }
+    }
 
     const server = app.listen(PORT, () => {
       console.log(`\n🚀 Server running on port ${PORT}`);

@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { requireAdmin } from '../middleware/auth';
 import Order from '../models/Order';
 import Product from '../models/Product';
 
@@ -63,8 +64,8 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// GET /api/orders - Get all orders (Admin only - will add auth later)
-router.get('/', async (req: Request, res: Response): Promise<void> => {
+// GET /api/orders - Get all orders (Admin only - JWT required)
+router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
@@ -107,7 +108,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// GET /api/orders/:orderNumber - Get single order by order number
+// GET /api/orders/:orderNumber - Get single order (public - used by guest order confirmation page)
 router.get('/:orderNumber', async (req: Request, res: Response): Promise<void> => {
   try {
     const { orderNumber } = req.params;
@@ -136,8 +137,8 @@ router.get('/:orderNumber', async (req: Request, res: Response): Promise<void> =
   }
 });
 
-// PATCH /api/orders/:id/status - Update order status (Admin only)
-router.patch('/:id/status', async (req: Request, res: Response): Promise<void> => {
+// PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
+router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { status } = req.body;
