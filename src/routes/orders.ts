@@ -66,75 +66,57 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
-    const status = req.query.status as string || '';
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 20;
+  const status = req.query.status as string || '';
 
-    const skip = (page - 1) * limit;
+  const skip = (page - 1) * limit;
 
-    // Build query
-    const query: any = {};
-    if (status) {
-      query.status = status;
-    }
-
-    // Execute query
-    const orders = await Order.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .select('-__v');
-
-    const total = await Order.countDocuments(query);
-
-    res.json({
-      success: true,
-      data: orders,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching orders:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch orders',
-      error: process.env.NODE_ENV === 'development' ? error : undefined
-    });
+  // Build query
+  const query: any = {};
+  if (status) {
+    query.status = status;
   }
+
+  // Execute query
+  const orders = await Order.find(query)
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .select('-__v');
+
+  const total = await Order.countDocuments(query);
+
+  res.json({
+    success: true,
+    data: orders,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  });
 });
 
 // GET /api/orders/:orderNumber - Get single order (public - used by guest order confirmation page)
 router.get('/:orderNumber', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { orderNumber } = req.params;
+  const { orderNumber } = req.params;
 
-    const order = await Order.findOne({ orderNumber }).select('-__v');
+  const order = await Order.findOne({ orderNumber }).select('-__v');
 
-    if (!order) {
-      res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-      return;
-    }
-
-    res.json({
-      success: true,
-      data: order
-    });
-  } catch (error) {
-    console.error('Error fetching order:', error);
-    res.status(500).json({
+  if (!order) {
+    res.status(404).json({
       success: false,
-      message: 'Failed to fetch order',
-      error: process.env.NODE_ENV === 'development' ? error : undefined
+      message: 'Order not found'
     });
+    return;
   }
+
+  res.json({
+    success: true,
+    data: order
+  });
 });
 
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)

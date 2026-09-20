@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import authRoutes from './routes/auth';
 import productRoutes from './routes/products';
 import orderRoutes from './routes/orders';
+import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
 
@@ -39,5 +40,9 @@ app.use((_req: Request, res: Response) => {
     message: 'Route not found'
   });
 });
+
+// Global error handler — must come AFTER all routes (Express matches it by
+// its 4-argument signature, no path needed)
+app.use(errorHandler);
 
 export default app;
