@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
-import { orderLimiter } from '../middleware/rateLimiters';
+import { orderLimiter, orderLookupLimiter } from '../middleware/rateLimiters';
 import Order from '../models/Order';
 import Product from '../models/Product';
 
@@ -174,11 +174,23 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   });
 });
 
-// GET /api/orders/:orderNumber - Get single order (public - used by guest order confirmation page)
-router.get('/:orderNumber', async (req: Request, res: Response): Promise<void> => {
+// GET /api/orders/:orderNumber?phone=... - Get single order (public, but the
+// order number ALONE must not be enough: number + phone together act as the
+// guest's credentials. A wrong phone gets the same 404 as a nonexistent order
+// so nobody can probe which order numbers exist.)
+router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Response): Promise<void> => {
   const { orderNumber } = req.params;
+  const phone = req.query.phone as string | undefined;
 
-  const order = await Order.findOne({ orderNumber }).select('-__v');
+  if (!phone) {
+    res.status(400).json({
+      success: false,
+      message: 'Phone number is required to view an order'
+    });
+    return;
+  }
+
+  const order = await Order.findOne({ orderNumber, phone }).select('-__v');
 
   if (!order) {
     res.status(404).json({

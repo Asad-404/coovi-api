@@ -143,3 +143,47 @@ describe('POST /api/orders (server-computed totals — CC-1)', () => {
     expect(res.body.success).toBe(false);
   });
 });
+
+describe('GET /api/orders/:orderNumber (phone-match lookup — CC-2)', () => {
+  beforeAll(seedProducts);
+
+  let orderNumber = '';
+
+  beforeAll(async () => {
+    const res = await request(app).post('/api/orders').send(validOrderBody());
+    expect(res.status).toBe(201);
+    orderNumber = res.body.data.orderNumber as string;
+  });
+
+  it('returns the order when the phone matches', async () => {
+    const res = await request(app)
+      .get(`/api/orders/${orderNumber}`)
+      .query({ phone: '01712345678' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.orderNumber).toBe(orderNumber);
+    expect(res.body.data.customerName).toBe('Test Customer');
+  });
+
+  it('returns 400 when no phone is provided', async () => {
+    const res = await request(app).get(`/api/orders/${orderNumber}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('Phone');
+  });
+
+  it('returns 404 for a WRONG phone — identical to a nonexistent order', async () => {
+    const wrongPhone = await request(app)
+      .get(`/api/orders/${orderNumber}`)
+      .query({ phone: '01999999999' });
+
+    const nonexistent = await request(app)
+      .get('/api/orders/ORD-20990101-999')
+      .query({ phone: '01999999999' });
+
+    expect(wrongPhone.status).toBe(404);
+    // same status AND same message: no way to tell the two cases apart
+    expect(nonexistent.status).toBe(404);
+    expect(wrongPhone.body).toEqual(nonexistent.body);
+  });
+});

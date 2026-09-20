@@ -37,3 +37,13 @@ export const orderLimiter: RateLimitRequestHandler = rateLimit({
   standardHeaders: 'draft-7',
   handler: tooManyRequests('Too many orders from this address, please try again later'),
 });
+
+// Order lookup by order number: tight, because probing order numbers with
+// guessed phones is an enumeration attack (and every probe hits the DB)
+export const orderLookupLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  skip: isTest,
+  standardHeaders: 'draft-7',
+  handler: tooManyRequests('Too many order lookups, please try again in a minute'),
+});
