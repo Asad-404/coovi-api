@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
 import Order from '../models/Order';
 import Product from '../models/Product';
@@ -15,53 +16,126 @@ const generateOrderNumber = (): string => {
   return `ORD-${year}${month}${day}-${random}`;
 };
 
+// Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
+// decides what it pays. Read at call time so tests and deploys can change it.
+const getDeliveryFee = (): number => {
+  const fee = Number(process.env.DELIVERY_FEE);
+  return Number.isFinite(fee) && fee >= 0 ? fee : 60;
+};
+
+// The order body deliberately accepts ONLY quantities (CC-1: never trust the
+// browser). NOT a strictObject on purpose: a client that still sends prices or
+// totals gets them silently DROPPED, not rejected — the API simply never reads
+// them, so a spoofed "total: 1" can't be stored no matter what the client sends.
+const orderBodySchema = z.object({
+  customerName: z.string().min(1).max(100),
+  phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01'),
+  address: z.string().min(5).max(500),
+  notes: z.string().max(500).optional(),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().min(1),
+        quantity: z.number().int().min(1).max(99)
+      })
+    )
+    .min(1)
+    .max(50)
+});
+
 // POST /api/orders - Create new order
 router.post('/', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { customerName, phone, address, items, subtotal, deliveryFee, total, notes } = req.body;
+  const parsed = orderBodySchema.safeParse(req.body);
 
-    // Validate required fields
-    if (!customerName || !phone || !address || !items || items.length === 0) {
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Invalid order data',
+      errors: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+    });
+    return;
+  }
+
+  const { customerName, phone, address, notes, items } = parsed.data;
+
+  // Load the REAL products from the DB — source of truth for price, name, image
+  const productIds = items.map((item) => item.productId);
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock images size');
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+  for (const item of items) {
+    const product = productMap.get(item.productId);
+
+    if (!product) {
       res.status(400).json({
         success: false,
-        message: 'Missing required fields'
+        message: `Item is no longer available (product ${item.productId})`
       });
       return;
     }
 
-    // Generate unique order number
-    const orderNumber = generateOrderNumber();
+    if (product.stock < item.quantity) {
+      res.status(400).json({
+        success: false,
+        message: `Only ${product.stock} left of "${product.name}" — you asked for ${item.quantity}`
+      });
+      return;
+    }
+  }
 
-    // Create order
-    const order = new Order({
-      orderNumber,
-      customerName,
-      phone,
-      address,
-      items,
-      subtotal,
-      deliveryFee,
-      total,
-      notes,
-      paymentMethod: 'Cash on Delivery',
-      status: 'Pending'
-    });
+  // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
+  const orderItems = items.map((item) => {
+    const product = productMap.get(item.productId)!;
+    return {
+      productId: item.productId,
+      name: product.name,
+      price: product.price,
+      quantity: item.quantity,
+      image: product.images[0],
+      size: product.size
+    };
+  });
 
-    await order.save();
+  const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const deliveryFee = getDeliveryFee();
+  const total = subtotal + deliveryFee;
 
-    res.status(201).json({
-      success: true,
-      data: order,
-      message: 'Order placed successfully'
-    });
-  } catch (error) {
-    console.error('Error creating order:', error);
+  // The unique orderNumber index can reject a random collision (1-in-1000/day) —
+  // generating a fresh number and retrying is friendlier than erroring
+  let order = null;
+  for (let attempt = 0; attempt < 3 && !order; attempt++) {
+    try {
+      order = await Order.create({
+        orderNumber: generateOrderNumber(),
+        customerName,
+        phone,
+        address,
+        notes,
+        items: orderItems,
+        subtotal,
+        deliveryFee,
+        total,
+        paymentMethod: 'Cash on Delivery',
+        status: 'Pending'
+      });
+    } catch (error: any) {
+      if (error.code !== 11000) throw error;
+    }
+  }
+
+  if (!order) {
     res.status(500).json({
       success: false,
-      message: 'Failed to create order',
-      error: process.env.NODE_ENV === 'development' ? error : undefined
+      message: 'Could not generate a unique order number, please try again'
     });
+    return;
   }
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    message: 'Order placed successfully'
+  });
 });
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
