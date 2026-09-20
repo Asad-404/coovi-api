@@ -195,68 +195,78 @@ router.get('/:orderNumber', async (req: Request, res: Response): Promise<void> =
 
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
 router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
+  const { id } = req.params;
+  const { status } = req.body;
 
-    const validStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
+  const validStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
 
-    if (!validStatuses.includes(status)) {
-      res.status(400).json({
-        success: false,
-        message: 'Invalid status'
-      });
-      return;
-    }
-
-    const order = await Order.findById(id);
-
-    if (!order) {
-      res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-      return;
-    }
-
-    const oldStatus = order.status;
-    order.status = status;
-
-    // Decrease stock when order is confirmed (status changes to Processing)
-    if (oldStatus === 'Pending' && status === 'Processing') {
-      for (const item of order.items) {
-        await Product.findByIdAndUpdate(
-          item.productId,
-          { $inc: { stock: -item.quantity } }
-        );
-      }
-    }
-
-    // Restore stock if order is cancelled after being processed
-    if (oldStatus === 'Processing' && status === 'Cancelled') {
-      for (const item of order.items) {
-        await Product.findByIdAndUpdate(
-          item.productId,
-          { $inc: { stock: item.quantity } }
-        );
-      }
-    }
-
-    await order.save();
-
-    res.json({
-      success: true,
-      data: order,
-      message: 'Order status updated successfully'
-    });
-  } catch (error) {
-    console.error('Error updating order status:', error);
-    res.status(500).json({
+  if (!validStatuses.includes(status)) {
+    res.status(400).json({
       success: false,
-      message: 'Failed to update order status',
-      error: process.env.NODE_ENV === 'development' ? error : undefined
+      message: 'Invalid status'
     });
+    return;
   }
+
+  const order = await Order.findById(id);
+
+  if (!order) {
+    res.status(404).json({
+      success: false,
+      message: 'Order not found'
+    });
+    return;
+  }
+
+  const oldStatus = order.status;
+
+  // Confirming an order takes stock out of the shop. Each decrement is ONE
+  // atomic operation that both checks and writes: the filter matches only
+  // when enough stock exists, so two admins confirming overlapping orders
+  // can never drive stock below zero (a plain $inc could).
+  if (oldStatus === 'Pending' && status === 'Processing') {
+    const taken: { productId: string; quantity: number }[] = [];
+
+    for (const item of order.items) {
+      const result = await Product.updateOne(
+        { _id: item.productId, stock: { $gte: item.quantity } },
+        { $inc: { stock: -item.quantity } }
+      );
+
+      if (result.matchedCount === 0) {
+        // This item couldn't be taken — give back any stock taken earlier in
+        // the loop so the order is left completely untouched
+        for (const t of taken) {
+          await Product.updateOne({ _id: t.productId }, { $inc: { stock: t.quantity } });
+        }
+
+        const product = await Product.findById(item.productId).select('name stock');
+        res.status(409).json({
+          success: false,
+          message: `Insufficient stock for "${product?.name ?? item.name}": only ${product?.stock ?? 0} left, order needs ${item.quantity}`
+        });
+        return;
+      }
+
+      taken.push({ productId: String(item.productId), quantity: item.quantity });
+    }
+  }
+
+  // Cancelling a confirmed order puts its stock back
+  if (oldStatus === 'Processing' && status === 'Cancelled') {
+    for (const item of order.items) {
+      await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
+    }
+  }
+
+  order.status = status;
+  await order.save();
+
+  res.json({
+    success: true,
+    data: order,
+    message: 'Order status updated successfully'
+  });
 });
 
 export default router;
