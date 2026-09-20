@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
+import { orderLimiter } from '../middleware/rateLimiters';
 import Order from '../models/Order';
 import Product from '../models/Product';
 
@@ -44,7 +45,7 @@ const orderBodySchema = z.object({
 });
 
 // POST /api/orders - Create new order
-router.post('/', async (req: Request, res: Response): Promise<void> => {
+router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void> => {
   const parsed = orderBodySchema.safeParse(req.body);
 
   if (!parsed.success) {

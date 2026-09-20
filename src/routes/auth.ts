@@ -3,12 +3,13 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import Admin from '../models/Admin';
 import { requireAdmin } from '../middleware/auth';
+import { loginLimiter } from '../middleware/rateLimiters';
 
 const router = Router();
 
 // POST /api/auth/login - Exchange email + password for a JWT token
 // (no try/catch — errors fall through to the global error handler)
-router.post('/login', async (req: Request, res: Response): Promise<void> => {
+router.post('/login', loginLimiter, async (req: Request, res: Response): Promise<void> => {
   const { email, password } = req.body;
 
   if (!email || !password) {

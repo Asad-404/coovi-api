@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
+import { readLimiter } from '../middleware/rateLimiters';
 import Product from '../models/Product';
 
 const router = Router();
@@ -44,7 +45,7 @@ const productBodySchema = z.strictObject({
 // Route code only handles errors it can answer specifically (400/404/11000).
 
 // GET /api/products - Get all products with pagination, search, and sort
-router.get('/', async (req: Request, res: Response): Promise<void> => {
+router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, search, sort, category } = listQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
 
@@ -100,7 +101,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 });
 
 // GET /api/products/:slug - Get single product by slug
-router.get('/:slug', async (req: Request, res: Response): Promise<void> => {
+router.get('/:slug', readLimiter, async (req: Request, res: Response): Promise<void> => {
   const { slug } = req.params;
 
   const product = await Product.findOne({ slug }).select('-__v');
