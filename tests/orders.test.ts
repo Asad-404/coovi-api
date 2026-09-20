@@ -144,6 +144,25 @@ describe('POST /api/orders (server-computed totals — CC-1)', () => {
   });
 });
 
+describe('GET /api/orders/delivery-fee (server-side fee for checkout display)', () => {
+  it('returns the delivery fee the server will actually charge', async () => {
+    process.env.DELIVERY_FEE = '75';
+    const res = await request(app).get('/api/orders/delivery-fee');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.deliveryFee).toBe(75);
+  });
+
+  it('is NOT swallowed by the /:orderNumber route (route order matters)', async () => {
+    const res = await request(app).get('/api/orders/delivery-fee');
+
+    // If the param route matched first, this would be a 404 "Order not found"
+    // or a 400 demanding a phone
+    expect(res.status).toBe(200);
+    expect(res.body.data.deliveryFee).toBe(60);
+  });
+});
+
 describe('GET /api/orders/:orderNumber (phone-match lookup — CC-2)', () => {
   beforeAll(seedProducts);
 

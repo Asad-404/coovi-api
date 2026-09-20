@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
-import { orderLimiter, orderLookupLimiter } from '../middleware/rateLimiters';
+import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order from '../models/Order';
 import Product from '../models/Product';
 
@@ -171,6 +171,18 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
       total,
       pages: Math.ceil(total / limit)
     }
+  });
+});
+
+// GET /api/orders/delivery-fee - The checkout page needs to SHOW the fee
+// before the customer places the order — this is the same server-side value
+// that will be charged, so the number can never disagree with the API.
+// Must be registered BEFORE GET /:orderNumber, or "delivery-fee" would be
+// captured as an orderNumber.
+router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void => {
+  res.json({
+    success: true,
+    data: { deliveryFee: getDeliveryFee() }
   });
 });
 
