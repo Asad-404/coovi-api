@@ -2,6 +2,7 @@ import express, { Application, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import mongoose from 'mongoose';
 import authRoutes from './routes/auth';
 import productRoutes from './routes/products';
 import orderRoutes from './routes/orders';
@@ -18,6 +19,12 @@ const corsOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000,http://l
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+
+// Behind a host proxy (Render, Vercel) every request arrives from the proxy's IP. Trusting one proxy hop makes
+// req.ip (and so the rate limiters) see the real visitor instead of locking everyone out together.
+// Override with TRUST_PROXY (a number of hops, or 0 to disable).
+const trustProxy = process.env.TRUST_PROXY ?? (process.env.NODE_ENV === 'production' ? '1' : '0');
+app.set('trust proxy', Number(trustProxy));
 
 // Middleware
 app.use(helmet());
@@ -36,6 +43,17 @@ app.get('/', (_req: Request, res: Response) => {
       orders: '/api/orders',
       auth: '/api/auth'
     }
+  });
+});
+
+// Health check for uptime monitors and smoke tests: 503 when the database is not connected
+app.get('/health', (_req: Request, res: Response) => {
+  const dbConnected = mongoose.connection.readyState === 1;
+  res.status(dbConnected ? 200 : 503).json({
+    success: dbConnected,
+    status: dbConnected ? 'ok' : 'degraded',
+    db: dbConnected ? 'connected' : 'disconnected',
+    uptimeSeconds: Math.round(process.uptime())
   });
 });
 

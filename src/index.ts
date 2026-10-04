@@ -2,13 +2,16 @@ import bcrypt from 'bcryptjs';
 import { connectToDatabase, closeDatabaseConnection } from './config/database';
 import Admin from './models/Admin';
 import app from './app';
+import { checkEnv } from './config/env';
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
-    if (!process.env.JWT_SECRET) {
-      console.error('❌ JWT_SECRET is not set in .env');
+    const { errors, warnings } = checkEnv();
+    warnings.forEach((warning) => console.warn(`⚠️  ${warning}`));
+    if (errors.length > 0) {
+      errors.forEach((error) => console.error(`❌ ${error}`));
       process.exit(1);
     }
 
