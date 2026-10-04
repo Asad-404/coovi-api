@@ -92,7 +92,6 @@ const OrderSchema = new Schema<IOrder>(
 );
 
 // Index for order lookup
-OrderSchema.index({ orderNumber: 1 });
 OrderSchema.index({ phone: 1 });
 OrderSchema.index({ status: 1 });
 OrderSchema.index({ createdAt: -1 });
