@@ -125,3 +125,62 @@ describe('PUT /api/products/:id (body validation)', () => {
     expect(res.body.success).toBe(false);
   });
 });
+
+describe('sale pricing (compareAtPrice)', () => {
+  const SALE_BODY = { ...VALID_PRODUCT, slug: 'sale-saree', name: 'Sale Saree', price: 1500, compareAtPrice: 2000 };
+
+  it('creates a discounted product and lists it under onSale=true only', async () => {
+    const token = await getAdminToken();
+    const created = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send(SALE_BODY);
+    expect(created.status).toBe(201);
+    expect(created.body.data.compareAtPrice).toBe(2000);
+
+    const onSale = await request(app).get('/api/products?onSale=true');
+    expect(onSale.status).toBe(200);
+    expect(onSale.body.data.map((p: { slug: string }) => p.slug)).toEqual(['sale-saree']);
+
+    const all = await request(app).get('/api/products?limit=50');
+    expect(all.body.data.length).toBeGreaterThan(1);
+  });
+
+  it('rejects an original price that is not higher than the price', async () => {
+    const token = await getAdminToken();
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...SALE_BODY, slug: 'bad-sale-saree', compareAtPrice: 1500 });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.join(' ')).toMatch(/compareAtPrice/);
+  });
+
+  it('removes the discount when compareAtPrice is sent as null', async () => {
+    const token = await getAdminToken();
+    const product = await Product.findOne({ slug: 'sale-saree' });
+    const res = await request(app)
+      .put(`/api/products/${product!._id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...SALE_BODY, compareAtPrice: null });
+    expect(res.status).toBe(200);
+    expect(res.body.data.compareAtPrice).toBeUndefined();
+
+    const onSale = await request(app).get('/api/products?onSale=true');
+    expect(onSale.body.data).toHaveLength(0);
+  });
+
+  it('still charges the current price in orders, not the original price', async () => {
+    const product = await Product.create({ ...VALID_PRODUCT, slug: 'order-sale-saree', price: 1200, compareAtPrice: 1800 });
+    const res = await request(app)
+      .post('/api/orders')
+      .send({
+        customerName: 'Sale Buyer',
+        phone: '01712345678',
+        address: 'House 1, Road 2, Dhaka',
+        items: [{ productId: String(product._id), quantity: 2 }],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.subtotal).toBe(2400);
+  });
+});

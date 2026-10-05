@@ -18,6 +18,7 @@ const listQuerySchema = z.object({
   search: z.string().max(100).catch(''),
   sort: z.enum(['newest', 'price-asc', 'price-desc', 'name-asc', 'name-desc']).catch('newest'),
   category: z.string().max(50).catch(''),
+  onSale: z.enum(['true', 'false']).catch('false'),
 });
 
 // Request bodies are validated STRICTLY: anything unexpected is rejected
@@ -33,12 +34,23 @@ const productBodySchema = z.strictObject({
   description: z.string().max(2000).optional(),
   descriptionBn: z.string().max(2000).optional(),
   price: z.number().int().min(0),
+  // Original price before a discount; null clears it. When it is greater than `price` the product is on sale
+  compareAtPrice: z.number().int().min(0).nullable().optional(),
   images: z.array(z.url()).min(1),
   size: z.string().max(50).optional(),
   category: z.string().min(1).max(50).default('Saree'),
   stock: z.number().int().min(0),
   inStock: z.boolean().default(true),
+}).refine((p) => p.compareAtPrice == null || p.compareAtPrice > p.price, {
+  path: ['compareAtPrice'],
+  message: 'must be greater than price (it is the original price before the discount)',
 });
+
+// A null compareAtPrice means "remove the discount": strip it from the document and $unset it on update
+function splitCompareAtPrice<T extends { compareAtPrice?: number | null }>(data: T) {
+  const { compareAtPrice, ...rest } = data;
+  return { fields: compareAtPrice == null ? rest : { ...rest, compareAtPrice }, clear: compareAtPrice === null };
+}
 
 // Routes below have NO try/catch: Express 5 automatically forwards any rejected
 // promise (or thrown error) to the global error handler in middleware/errorHandler.ts.
@@ -46,10 +58,14 @@ const productBodySchema = z.strictObject({
 
 // GET /api/products - Get all products with pagination, search, and sort
 router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> => {
-  const { page, limit, search, sort, category } = listQuerySchema.parse(req.query);
+  const { page, limit, search, sort, category, onSale } = listQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
 
-  const query: { name?: { $regex: string; $options: string }; category?: string } = {};
+  const query: {
+    name?: { $regex: string; $options: string };
+    category?: string;
+    $expr?: { $gt: string[] };
+  } = {};
 
   // Search by name (partial match, case-insensitive, regex-safe)
   if (search) {
@@ -58,6 +74,11 @@ router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> 
 
   if (category) {
     query.category = category;
+  }
+
+  // On sale = has an original price higher than the current price
+  if (onSale === 'true') {
+    query.$expr = { $gt: ['$compareAtPrice', '$price'] };
   }
 
   const sortQuery: Record<string, 1 | -1> = {};
@@ -134,7 +155,7 @@ router.post('/', requireAdmin, async (req: Request, res: Response, next: NextFun
   }
 
   try {
-    const product = new Product(parsed.data);
+    const product = new Product(splitCompareAtPrice(parsed.data).fields);
     await product.save();
 
     res.status(201).json({
@@ -169,7 +190,12 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<vo
     return;
   }
 
-  const product = await Product.findByIdAndUpdate(id, parsed.data, { new: true });
+  const { fields, clear } = splitCompareAtPrice(parsed.data);
+  const product = await Product.findByIdAndUpdate(
+    id,
+    clear ? { ...fields, $unset: { compareAtPrice: 1 } } : fields,
+    { new: true }
+  );
 
   if (!product) {
     res.status(404).json({

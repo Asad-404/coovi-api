@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import Admin from '../models/Admin';
@@ -80,6 +81,51 @@ router.get('/me', requireAdmin, async (req: Request, res: Response): Promise<voi
     success: true,
     data: admin
   });
+});
+
+// PATCH /api/auth/password - Change the signed-in admin's password.
+// Needs the CURRENT password too, so a stolen token alone cannot lock the owner out.
+const passwordBodySchema = z.strictObject({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8, 'must be at least 8 characters').max(100)
+});
+
+router.patch('/password', requireAdmin, loginLimiter, async (req: Request, res: Response): Promise<void> => {
+  const parsed = passwordBodySchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Invalid password data',
+      errors: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+    });
+    return;
+  }
+
+  const { currentPassword, newPassword } = parsed.data;
+  const admin = await Admin.findById(req.admin?.id);
+
+  if (!admin) {
+    res.status(404).json({ success: false, message: 'Admin not found' });
+    return;
+  }
+
+  const isMatch = await bcrypt.compare(currentPassword, admin.passwordHash);
+
+  if (!isMatch) {
+    res.status(401).json({ success: false, message: 'Current password is incorrect' });
+    return;
+  }
+
+  if (currentPassword === newPassword) {
+    res.status(400).json({ success: false, message: 'New password must be different from the current one' });
+    return;
+  }
+
+  admin.passwordHash = await bcrypt.hash(newPassword, 10);
+  await admin.save();
+
+  res.json({ success: true, message: 'Password changed successfully' });
 });
 
 export default router;

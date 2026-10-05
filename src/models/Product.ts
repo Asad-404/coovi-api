@@ -7,6 +7,7 @@ export interface IProduct extends Document {
   description?: string;
   descriptionBn?: string;
   price: number;
+  compareAtPrice?: number;
   images: string[];
   size?: string;
   category: string;
@@ -45,6 +46,10 @@ const ProductSchema = new Schema<IProduct>(
     price: {
       type: Number,
       required: true,
+      min: 0
+    },
+    compareAtPrice: {
+      type: Number,
       min: 0
     },
     images: [{
