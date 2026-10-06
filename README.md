@@ -38,7 +38,19 @@ Real values live only in `.env` (gitignored). Never commit credentials.
 ## API overview
 
 - Public: product list/detail (search by name, sort by price, pagination), order creation (COD, guest checkout), order lookup by order number
-- Admin (JWT `Authorization: Bearer <token>`): product create/update/delete, order list, order status updates (stock moves on Pending→Processing)
+- Admin (JWT `Authorization: Bearer <token>`): product create/update/delete, order list, order status updates, editing an order's customer details (`PATCH /api/orders/:id` — name, phone, address, notes; not items or totals; refused once Delivered/Cancelled)
+
+### Order status flow
+
+Orders only move forward; any other change is a `409`:
+
+```
+Pending ──► Processing ──► Shipped ──► Delivered
+   │            │
+   └──► Cancelled ◄──┘
+```
+
+Stock is taken on Pending → Processing and returned on Processing → Cancelled. Each change is claimed atomically, so two admins clicking at once can't take or return stock twice.
 
 Full endpoint contract: see `API_ENDPOINTS.md` in the project documentation.
 
