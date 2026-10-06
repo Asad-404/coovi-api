@@ -126,6 +126,17 @@ describe('POST /api/orders (server-computed totals — CC-1)', () => {
     expect(res.body.message).toContain('Only 5 left');
   });
 
+  it('rejects a product the admin switched off (inStock: false) even with units left', async () => {
+    await Product.updateOne({ _id: blueId }, { $set: { inStock: false } });
+    const res = await request(app)
+      .post('/api/orders')
+      .send({ ...validOrderBody(), items: [{ productId: blueId, quantity: 1 }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('currently unavailable');
+    await Product.updateOne({ _id: blueId }, { $set: { inStock: true } });
+  });
+
   it('rejects an invalid Bangladeshi phone number with 400', async () => {
     const res = await request(app)
       .post('/api/orders')
@@ -204,5 +215,40 @@ describe('GET /api/orders/:orderNumber (phone-match lookup — CC-2)', () => {
     // same status AND same message: no way to tell the two cases apart
     expect(nonexistent.status).toBe(404);
     expect(wrongPhone.body).toEqual(nonexistent.body);
+  });
+});
+
+describe('GET /api/orders (admin list query validation)', () => {
+  beforeAll(async () => {
+    await seedProducts();
+    await request(app).post('/api/orders').send(validOrderBody());
+  });
+
+  async function adminGet(query: string) {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'testadmin@coovi.com', password: 'testpass123' });
+    return request(app).get(`/api/orders${query}`).set('Authorization', `Bearer ${login.body.data.token}`);
+  }
+
+  it('clamps a negative page to 1 (was a negative skip)', async () => {
+    const res = await adminGet('?page=-1');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.page).toBe(1);
+    expect(res.body.data).toHaveLength(1);
+  });
+
+  it('caps the page size at 100, the size the admin app requests', async () => {
+    const res = await adminGet('?limit=5000');
+    expect(res.body.pagination.limit).toBe(100);
+  });
+
+  it('ignores an unknown status filter instead of matching nothing', async () => {
+    const all = await adminGet('?status=Bogus');
+    expect(all.body.data).toHaveLength(1);
+    const pending = await adminGet('?status=Pending');
+    expect(pending.body.data).toHaveLength(1);
+    const shipped = await adminGet('?status=Shipped');
+    expect(shipped.body.data).toHaveLength(0);
   });
 });

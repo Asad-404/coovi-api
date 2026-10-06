@@ -37,8 +37,8 @@ Real values live only in `.env` (gitignored). Never commit credentials.
 
 ## API overview
 
-- Public: product list/detail (search by name, sort by price, pagination), order creation (COD, guest checkout), order lookup by order number
-- Admin (JWT `Authorization: Bearer <token>`): product create/update/delete, order list, order status updates, editing an order's customer details (`PATCH /api/orders/:id` — name, phone, address, notes; not items or totals; refused once Delivered/Cancelled)
+- Public: product list/detail (search by name, sort by price, pagination with `limit` up to 50), order creation (COD, guest checkout; refused for products with `inStock: false` or too little `stock`), order lookup by order number + phone
+- Admin (JWT `Authorization: Bearer <token>`): product create/update/delete (`PUT` is a full replace: optional fields left out are cleared), order list (`page`, `limit` up to 100, `status`), order status updates, editing an order's customer details (`PATCH /api/orders/:id` — name, phone, address, notes; not items or totals; refused once Delivered/Cancelled)
 
 ### Order status flow
 

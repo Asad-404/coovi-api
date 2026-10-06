@@ -33,7 +33,8 @@ const productBodySchema = z.strictObject({
   nameBn: z.string().max(120).optional(),
   description: z.string().max(2000).optional(),
   descriptionBn: z.string().max(2000).optional(),
-  price: z.number().int().min(0),
+  // Whole taka, at least 1: a ৳0 product would ship free on cash on delivery
+  price: z.number().int().min(1),
   // Original price before a discount; null clears it. When it is greater than `price` the product is on sale
   compareAtPrice: z.number().int().min(0).nullable().optional(),
   images: z.array(z.url()).min(1),
@@ -46,10 +47,14 @@ const productBodySchema = z.strictObject({
   message: 'must be greater than price (it is the original price before the discount)',
 });
 
-// A null compareAtPrice means "remove the discount": strip it from the document and $unset it on update
-function splitCompareAtPrice<T extends { compareAtPrice?: number | null }>(data: T) {
+// Optional fields a full PUT replaces: leaving one out (or a null compareAtPrice) clears it,
+// so the admin form can empty a field instead of the old value silently staying
+const OPTIONAL_FIELDS = ['nameBn', 'description', 'descriptionBn', 'size', 'compareAtPrice'] as const;
+
+// A null compareAtPrice means "remove the discount": strip it before saving
+function withoutNullCompareAtPrice<T extends { compareAtPrice?: number | null }>(data: T) {
   const { compareAtPrice, ...rest } = data;
-  return { fields: compareAtPrice == null ? rest : { ...rest, compareAtPrice }, clear: compareAtPrice === null };
+  return compareAtPrice == null ? rest : { ...rest, compareAtPrice };
 }
 
 // Routes below have NO try/catch: Express 5 automatically forwards any rejected
@@ -155,7 +160,7 @@ router.post('/', requireAdmin, async (req: Request, res: Response, next: NextFun
   }
 
   try {
-    const product = new Product(splitCompareAtPrice(parsed.data).fields);
+    const product = new Product(withoutNullCompareAtPrice(parsed.data));
     await product.save();
 
     res.status(201).json({
@@ -190,11 +195,14 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<vo
     return;
   }
 
-  const { fields, clear } = splitCompareAtPrice(parsed.data);
+  const fields = withoutNullCompareAtPrice(parsed.data);
+  const cleared = OPTIONAL_FIELDS.filter((field) => (fields as Record<string, unknown>)[field] === undefined);
   const product = await Product.findByIdAndUpdate(
     id,
-    clear ? { ...fields, $unset: { compareAtPrice: 1 } } : fields,
-    { new: true }
+    cleared.length
+      ? { ...fields, $unset: Object.fromEntries(cleared.map((field) => [field, 1])) }
+      : fields,
+    { returnDocument: 'after' }
   );
 
   if (!product) {

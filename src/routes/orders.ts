@@ -61,7 +61,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   // Load the REAL products from the DB — source of truth for price, name, image
   const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock images size');
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size');
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
   for (const item of items) {
@@ -71,6 +71,15 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
       res.status(400).json({
         success: false,
         message: `Item is no longer available (product ${item.productId})`
+      });
+      return;
+    }
+
+    // The admin's "Available for sale" switch (inStock) takes a product off sale even while units remain
+    if (!product.inStock) {
+      res.status(400).json({
+        success: false,
+        message: `"${product.name}" is currently unavailable`
       });
       return;
     }
@@ -139,16 +148,24 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   });
 });
 
+type OrderStatus = IOrder['status'];
+
+const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'] as const;
+
+// Same lenient query handling as GET /api/products: bad values fall back to
+// defaults instead of erroring (a negative page used to reach Mongo as a negative skip)
+const orderListQuerySchema = z.object({
+  page: z.coerce.number().int().catch(1).transform((v) => Math.max(1, v)),
+  limit: z.coerce.number().int().catch(20).transform((v) => Math.min(Math.max(1, v), 100)),
+  status: z.enum(ORDER_STATUSES).optional().catch(undefined)
+});
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const page = parseInt(req.query.page as string) || 1;
-  const limit = parseInt(req.query.limit as string) || 20;
-  const status = req.query.status as string || '';
-
+  const { page, limit, status } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
 
-  // Build query
-  const query: any = {};
+  const query: { status?: OrderStatus } = {};
   if (status) {
     query.status = status;
   }
@@ -217,10 +234,6 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     data: order
   });
 });
-
-type OrderStatus = IOrder['status'];
-
-const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'] as const;
 
 // Orders only move forward. Stock is taken on Pending → Processing and given
 // back on Processing → Cancelled; every other jump (back to Pending, cancelling
