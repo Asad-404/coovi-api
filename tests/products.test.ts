@@ -87,6 +87,16 @@ describe('POST /api/products (body validation)', () => {
     expect(res.status).toBe(400);
   });
 
+  it('rejects a price of 0', async () => {
+    const token = await getAdminToken();
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_PRODUCT, slug: 'free-saree', price: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.join(' ')).toMatch(/price/);
+  });
+
   it('rejects a malformed slug', async () => {
     const token = await getAdminToken();
     const res = await request(app)
@@ -168,6 +178,25 @@ describe('sale pricing (compareAtPrice)', () => {
 
     const onSale = await request(app).get('/api/products?onSale=true');
     expect(onSale.body.data).toHaveLength(0);
+  });
+
+  it('clears optional fields the admin form leaves empty on a full PUT', async () => {
+    const token = await getAdminToken();
+    const product = await Product.create({
+      ...VALID_PRODUCT,
+      slug: 'clear-fields-saree',
+      nameBn: 'শাড়ি',
+      description: 'Old description',
+      size: 'Free Size',
+    });
+    const res = await request(app)
+      .put(`/api/products/${product._id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_PRODUCT, slug: 'clear-fields-saree' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.nameBn).toBeUndefined();
+    expect(res.body.data.description).toBeUndefined();
+    expect(res.body.data.size).toBeUndefined();
   });
 
   it('still charges the current price in orders, not the original price', async () => {
