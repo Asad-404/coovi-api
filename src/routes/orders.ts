@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
-import Order from '../models/Order';
+import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
 
 const router = Router();
@@ -218,14 +218,83 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
   });
 });
 
+type OrderStatus = IOrder['status'];
+
+const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'] as const;
+
+// Orders only move forward. Stock is taken on Pending → Processing and given
+// back on Processing → Cancelled; every other jump (back to Pending, cancelling
+// after shipping, reopening a delivered order) would take or return stock twice
+// or not at all, so it is refused.
+export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
+  Pending: ['Processing', 'Cancelled'],
+  Processing: ['Shipped', 'Cancelled'],
+  Shipped: ['Delivered'],
+  Delivered: [],
+  Cancelled: []
+};
+
+// Admin can correct contact/delivery details after a customer calls. Items,
+// prices and totals are NOT editable here — they stay server-computed (CC-1).
+// strictObject: anything else in the body is a 400, not silently ignored, so an
+// admin client can never believe it changed a total.
+const orderDetailsSchema = z
+  .strictObject({
+    customerName: z.string().trim().min(1).max(100).optional(),
+    phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01').optional(),
+    address: z.string().trim().min(5).max(500).optional(),
+    notes: z.string().trim().max(500).optional()
+  })
+  .refine((body) => Object.keys(body).length > 0, 'Send at least one field to update');
+
+// Delivered and Cancelled orders are history — their details are frozen
+const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled'];
+
+// PATCH /api/orders/:id - Edit customer/delivery details (Admin only - JWT required)
+router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+  const parsed = orderDetailsSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Invalid order details',
+      errors: parsed.error.issues.map((issue) =>
+        issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message
+      )
+    });
+    return;
+  }
+
+  const order = await Order.findOneAndUpdate(
+    { _id: req.params.id, status: { $nin: FINAL_STATUSES } },
+    { $set: parsed.data },
+    { returnDocument: 'after', runValidators: true }
+  ).select('-__v');
+
+  if (!order) {
+    const exists = await Order.exists({ _id: req.params.id });
+    res.status(exists ? 409 : 404).json({
+      success: false,
+      message: exists ? 'Delivered or cancelled orders can no longer be edited' : 'Order not found'
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    data: order,
+    message: 'Order updated successfully'
+  });
+});
+
+const statusBodySchema = z.object({ status: z.enum(ORDER_STATUSES) });
+
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
 router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
-  const { status } = req.body;
+  const parsed = statusBodySchema.safeParse(req.body);
 
-  const validStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
-
-  if (!validStatuses.includes(status)) {
+  if (!parsed.success) {
     res.status(400).json({
       success: false,
       message: 'Invalid status'
@@ -233,9 +302,10 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     return;
   }
 
-  const order = await Order.findById(id);
+  const { status } = parsed.data;
+  const current = await Order.findById(id).select('status');
 
-  if (!order) {
+  if (!current) {
     res.status(404).json({
       success: false,
       message: 'Order not found'
@@ -243,7 +313,37 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     return;
   }
 
-  const oldStatus = order.status;
+  const oldStatus = current.status;
+
+  if (!NEXT_STATUSES[oldStatus].includes(status)) {
+    const allowed = NEXT_STATUSES[oldStatus];
+    res.status(409).json({
+      success: false,
+      message:
+        oldStatus === status
+          ? `Order is already ${status}`
+          : `Can't move an order from ${oldStatus} to ${status}` +
+            (allowed.length ? ` (allowed: ${allowed.join(', ')})` : ` — ${oldStatus} is final`)
+    });
+    return;
+  }
+
+  // Claim the transition atomically: the filter only matches while the order
+  // is still in oldStatus, so two admins clicking at once can't both take (or
+  // both return) the stock — the second one gets a 409.
+  const order = await Order.findOneAndUpdate(
+    { _id: id, status: oldStatus },
+    { $set: { status } },
+    { returnDocument: 'after' }
+  ).select('-__v');
+
+  if (!order) {
+    res.status(409).json({
+      success: false,
+      message: 'This order was just changed by someone else — reload and try again'
+    });
+    return;
+  }
 
   // Confirming an order takes stock out of the shop. Each decrement is ONE
   // atomic operation that both checks and writes: the filter matches only
@@ -260,10 +360,11 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
 
       if (result.matchedCount === 0) {
         // This item couldn't be taken — give back any stock taken earlier in
-        // the loop so the order is left completely untouched
+        // the loop and release the claim so the order is left completely untouched
         for (const t of taken) {
           await Product.updateOne({ _id: t.productId }, { $inc: { stock: t.quantity } });
         }
+        await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
 
         const product = await Product.findById(item.productId).select('name stock');
         res.status(409).json({
@@ -283,9 +384,6 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
       await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
     }
   }
-
-  order.status = status;
-  await order.save();
 
   res.json({
     success: true,
