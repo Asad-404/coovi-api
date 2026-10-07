@@ -16,9 +16,13 @@ pnpm exec vitest run <test-file>
 
 `pnpm seed` replaces database product data with sample products; use it only when explicitly intended.
 
+Claude may run `pnpm test`, `pnpm build` and `pnpm exec tsc --noEmit` to check changes, and may push feature branches and open pull requests; never push `master`. Do not start `pnpm dev` or run `pnpm seed` unless asked.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the typecheck and the tests on every pull request and push to `master`. Keep it green.
+
 ## Architecture
 
-- `src/index.ts` starts Express, connects to MongoDB, seeds the first admin, registers middleware/routes, and handles shutdown.
+- `src/app.ts` builds the Express app (middleware, routes, error handler); `src/index.ts` connects to MongoDB, seeds the first admin, starts the server, and handles shutdown.
 - `src/config/` owns the MongoDB connection; `src/models/` owns Mongoose schemas; `src/routes/` owns products, orders, and auth endpoints; `src/middleware/` owns JWT admin authorization.
 - Protected admin routes require a JWT Bearer token. Public checkout is guest-only.
 - The server loads product prices and stock from MongoDB and computes order items, subtotal, delivery fee, and total. Clients should send only product IDs and quantities.
