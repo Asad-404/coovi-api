@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import authRoutes from './routes/auth';
 import productRoutes from './routes/products';
 import orderRoutes from './routes/orders';
+import uploadRoutes from './routes/uploads';
 import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
@@ -41,7 +42,8 @@ app.get('/', (_req: Request, res: Response) => {
     endpoints: {
       products: '/api/products',
       orders: '/api/orders',
-      auth: '/api/auth'
+      auth: '/api/auth',
+      uploads: '/api/uploads'
     }
   });
 });
@@ -60,6 +62,7 @@ app.get('/health', (_req: Request, res: Response) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
+app.use('/api/uploads', uploadRoutes);
 
 // 404 handler
 app.use((_req: Request, res: Response) => {

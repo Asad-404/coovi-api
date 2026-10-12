@@ -36,5 +36,9 @@ export function checkEnv(env: NodeJS.ProcessEnv = process.env): EnvCheck {
     warnings.push('DELIVERY_FEE is not a valid non-negative number; the default of 60 will be used');
   }
 
+  if (!env.CLOUDINARY_CLOUD_NAME || !env.CLOUDINARY_API_KEY || !env.CLOUDINARY_API_SECRET) {
+    warnings.push('CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET are not all set; admin photo upload will be unavailable');
+  }
+
   return { errors, warnings };
 }
