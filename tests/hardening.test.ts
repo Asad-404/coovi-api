@@ -10,6 +10,9 @@ const GOOD_PROD_ENV = {
   CORS_ORIGINS: 'https://shop.example.com,https://admin.example.com',
   ADMIN_PASSWORD: 'a-long-unique-passphrase-9!',
   DELIVERY_FEE: '60',
+  CLOUDINARY_CLOUD_NAME: 'demo-cloud',
+  CLOUDINARY_API_KEY: '123456789012345',
+  CLOUDINARY_API_SECRET: 'test-cloudinary-secret',
 } as NodeJS.ProcessEnv;
 
 describe('checkEnv', () => {
@@ -42,6 +45,12 @@ describe('checkEnv', () => {
   it('warns about an invalid delivery fee', () => {
     const result = checkEnv({ ...GOOD_PROD_ENV, DELIVERY_FEE: 'free' } as NodeJS.ProcessEnv);
     expect(result.warnings.join(' ')).toMatch(/DELIVERY_FEE/);
+  });
+
+  it('warns, without failing production, when the Cloudinary keys are missing', () => {
+    const result = checkEnv({ ...GOOD_PROD_ENV, CLOUDINARY_API_SECRET: '' } as NodeJS.ProcessEnv);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join(' ')).toMatch(/CLOUDINARY/);
   });
 });
 
