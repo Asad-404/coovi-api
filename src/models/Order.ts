@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { DELIVERY_AREAS, DISTRICTS, type DeliveryArea } from '../services/deliveryFees';
 
 export interface IOrderItem {
   productId: string;
@@ -41,13 +42,22 @@ export interface IOrder extends Document {
   customerName: string;
   phone: string;
   address: string;
+  // Missing on orders placed before delivery areas existed
+  district?: string;
+  deliveryArea: DeliveryArea;
   items: IOrderItem[];
   subtotal: number;
+  // Taka off the items, agreed by an admin on a manual order (0 for website orders)
+  discount: number;
   deliveryFee: number;
   total: number;
   status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled';
   paymentMethod: string;
   notes?: string;
+  // Where the order came from: the website checkout, or entered by an admin
+  source: 'website' | 'facebook' | 'whatsapp' | 'phone' | 'other';
+  // Email of the admin who entered a manual order
+  createdBy?: string;
   // Admin-only (see PRIVATE_ORDER_FIELDS in routes/orders.ts): never shown to the customer
   internalNotes: IOrderNote[];
   statusHistory: IStatusChange[];
@@ -80,6 +90,15 @@ const OrderSchema = new Schema<IOrder>(
       required: true,
       trim: true
     },
+    district: {
+      type: String,
+      enum: DISTRICTS
+    },
+    deliveryArea: {
+      type: String,
+      enum: DELIVERY_AREAS,
+      default: 'inside_dhaka'
+    },
     items: [{
       productId: { type: String, required: true },
       name: { type: String, required: true },
@@ -93,6 +112,11 @@ const OrderSchema = new Schema<IOrder>(
     subtotal: {
       type: Number,
       required: true,
+      min: 0
+    },
+    discount: {
+      type: Number,
+      default: 0,
       min: 0
     },
     deliveryFee: {
@@ -119,6 +143,14 @@ const OrderSchema = new Schema<IOrder>(
     notes: {
       type: String,
       trim: true
+    },
+    source: {
+      type: String,
+      enum: ['website', 'facebook', 'whatsapp', 'phone', 'other'],
+      default: 'website'
+    },
+    createdBy: {
+      type: String
     },
     // Append-only: no route edits or deletes these, so the record can be trusted.
     // Orders placed before this existed simply have empty arrays.
@@ -164,6 +196,7 @@ const OrderSchema = new Schema<IOrder>(
 // Index for order lookup
 OrderSchema.index({ phone: 1 });
 OrderSchema.index({ status: 1 });
+OrderSchema.index({ deliveryArea: 1 });
 OrderSchema.index({ createdAt: -1 });
 // "Changed since" lookups from the admin (GET /orders?updatedSince=)
 OrderSchema.index({ updatedAt: 1 });

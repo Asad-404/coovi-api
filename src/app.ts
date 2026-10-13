@@ -7,6 +7,7 @@ import authRoutes from './routes/auth';
 import productRoutes from './routes/products';
 import orderRoutes from './routes/orders';
 import uploadRoutes from './routes/uploads';
+import settingsRoutes from './routes/settings';
 import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
@@ -43,7 +44,8 @@ app.get('/', (_req: Request, res: Response) => {
       products: '/api/products',
       orders: '/api/orders',
       auth: '/api/auth',
-      uploads: '/api/uploads'
+      uploads: '/api/uploads',
+      settings: '/api/settings'
     }
   });
 });
@@ -63,6 +65,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/uploads', uploadRoutes);
+app.use('/api/settings', settingsRoutes);
 
 // 404 handler
 app.use((_req: Request, res: Response) => {

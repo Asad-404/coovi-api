@@ -123,6 +123,21 @@ describe('status history', () => {
   });
 });
 
+describe('manual orders', () => {
+  it('records the admin who entered the order as the first history entry', async () => {
+    const res = await auth(request(app).post('/api/orders/manual')).send({
+      customerName: 'Phone Order Customer',
+      phone: PHONE,
+      address: 'House 3, Road 9, Uttara, Dhaka',
+      items: [{ productId, quantity: 1 }],
+      source: 'phone'
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.data.statusHistory).toHaveLength(1);
+    expect(res.body.data.statusHistory[0]).toMatchObject({ to: 'Pending', by: TEST_ADMIN.email });
+  });
+});
+
 describe('detail edit history', () => {
   it('records who changed which field, from what to what', async () => {
     const { _id } = await placeOrder();
@@ -142,6 +157,18 @@ describe('detail edit history', () => {
         { field: 'notes', to: 'Ring the bell twice' }
       ]
     });
+  });
+
+  it('records a delivery area change with the fee and total the API recomputed', async () => {
+    const placed = await placeOrder();
+    const res = await auth(request(app).patch(`/api/orders/${placed._id}`)).send({ district: 'Sylhet' });
+
+    expect(res.status).toBe(200);
+    const changes = res.body.data.editHistory[0].changes as { field: string; from?: string; to?: string }[];
+    expect(changes.map((c) => c.field)).toEqual(['district', 'deliveryArea', 'deliveryFee', 'total']);
+    expect(changes[0].to).toBe('Sylhet');
+    expect(changes[2]).toMatchObject({ from: String(placed.deliveryFee), to: String(res.body.data.deliveryFee) });
+    expect(changes[3]).toMatchObject({ from: String(placed.total), to: String(res.body.data.total) });
   });
 
   it('writes no entry when nothing actually changes', async () => {
