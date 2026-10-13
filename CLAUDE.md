@@ -23,7 +23,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs the typecheck and the tests on 
 ## Architecture
 
 - `src/app.ts` builds the Express app (middleware, routes, error handler); `src/index.ts` connects to MongoDB, seeds the first admin, starts the server, and handles shutdown.
-- `src/config/` owns the MongoDB connection; `src/models/` owns Mongoose schemas; `src/routes/` owns products, orders, and auth endpoints; `src/middleware/` owns JWT admin authorization.
+- `src/config/` owns the MongoDB connection; `src/models/` owns Mongoose schemas; `src/routes/` owns products, orders, auth, uploads and courier-payment endpoints; `src/middleware/` owns JWT admin authorization.
 - Protected admin routes require a JWT Bearer token. Public checkout is guest-only.
 - The server loads product prices and stock from MongoDB and computes order items, subtotal, delivery fee, and total. Clients should send only product IDs and quantities.
 - Order status is forward-only (`NEXT_STATUSES` in `src/routes/orders.ts`): Pending → Processing | Cancelled, Processing → Shipped | Cancelled, Shipped → Delivered; Delivered and Cancelled are final. Other transitions return 409.
