@@ -31,9 +31,11 @@ export function checkEnv(env: NodeJS.ProcessEnv = process.env): EnvCheck {
     problems.push('ADMIN_PASSWORD is a well-known weak password; choose a strong one');
   }
 
-  const fee = env.DELIVERY_FEE;
-  if (fee !== undefined && fee !== '' && !(Number.isFinite(Number(fee)) && Number(fee) >= 0)) {
-    warnings.push('DELIVERY_FEE is not a valid non-negative number; the default of 60 will be used');
+  for (const name of ['DELIVERY_FEE', 'DELIVERY_FEE_INSIDE_DHAKA', 'DELIVERY_FEE_OUTSIDE_DHAKA']) {
+    const fee = env[name];
+    if (fee !== undefined && fee !== '' && !(Number.isFinite(Number(fee)) && Number(fee) >= 0)) {
+      warnings.push(`${name} is not a valid non-negative number; it will be ignored`);
+    }
   }
 
   if (!env.CLOUDINARY_CLOUD_NAME || !env.CLOUDINARY_API_KEY || !env.CLOUDINARY_API_SECRET) {

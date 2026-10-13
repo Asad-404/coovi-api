@@ -168,6 +168,6 @@ describe('Website orders', () => {
     expect(res.body.data.source).toBe('website');
     expect(res.body.data.discount).toBe(0);
     expect(res.body.data.createdBy).toBeUndefined();
-    expect(res.body.data.total).toBe(3000 + 60);
+    expect(res.body.data.total).toBe(3000 + 70);
   });
 });

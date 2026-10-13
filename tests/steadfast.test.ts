@@ -142,6 +142,22 @@ describe('POST /api/orders/:id/courier/steadfast', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('adds the district to the address when the address does not name it', async () => {
+    await Order.updateOne({ _id: orderId }, { $set: { address: 'House 3, Road 1, Agrabad', district: 'Chattogram' } });
+    steadfastReplies(BOOKED);
+
+    expect((await book()).status).toBe(201);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).recipient_address).toBe('House 3, Road 1, Agrabad, Chattogram');
+  });
+
+  it('does not repeat a district the address already names', async () => {
+    await Order.updateOne({ _id: orderId }, { $set: { district: 'Dhaka' } });
+    steadfastReplies(BOOKED);
+
+    await book();
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).recipient_address).toBe('House 12, Road 5, Dhanmondi, Dhaka');
+  });
+
   it('returns 404 for an unknown order', async () => {
     const res = await book('64b000000000000000000000');
     expect(res.status).toBe(404);

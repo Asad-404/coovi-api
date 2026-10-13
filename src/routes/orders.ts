@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
@@ -10,6 +11,13 @@ import {
   SteadfastError,
   SteadfastNotConfiguredError
 } from '../services/steadfast';
+import {
+  DELIVERY_AREAS,
+  DISTRICTS,
+  getDeliveryFee,
+  getDeliveryFees,
+  resolveDeliveryArea
+} from '../services/deliveryFees';
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
 import { notifyNewOrder } from '../services/notify';
 
@@ -22,13 +30,6 @@ const router = Router();
 // only ever be one plain phone string.
 const phoneSchema = z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01');
 
-// Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
-// decides what it pays. Read at call time so tests and deploys can change it.
-const getDeliveryFee = (): number => {
-  const fee = Number(process.env.DELIVERY_FEE);
-  return Number.isFinite(fee) && fee >= 0 ? fee : 60;
-};
-
 // The order body deliberately accepts ONLY quantities (CC-1: never trust the
 // browser). NOT a strictObject on purpose: a client that still sends prices or
 // totals gets them silently DROPPED, not rejected — the API simply never reads
@@ -37,6 +38,9 @@ const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
   phone: phoneSchema,
   address: z.string().min(5).max(500),
+  // Optional so an older storefront that sends neither still works (inside Dhaka)
+  district: z.enum(DISTRICTS).optional(),
+  deliveryArea: z.enum(DELIVERY_AREAS).optional(),
   notes: z.string().max(500).optional(),
   items: z
     .array(
@@ -62,9 +66,16 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     return;
   }
 
-  const { customerName, phone, address, notes, items } = parsed.data;
+  const { customerName, phone, address, district, notes, items } = parsed.data;
 
-  // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
+  const resolved = resolveDeliveryArea(district, parsed.data.deliveryArea);
+  if ('error' in resolved) {
+    res.status(400).json({ success: false, message: 'Invalid order data', errors: [`deliveryArea: ${resolved.error}`] });
+    return;
+  }
+  const deliveryArea = resolved.area;
+
+  // Recompute EVERYTHING server-side (CC-1); the fee comes from the area (CC-3)
   const built = await buildOrderItems(items);
 
   if (!built.ok) {
@@ -73,13 +84,15 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   }
 
   const { items: orderItems, subtotal } = built;
-  const deliveryFee = getDeliveryFee();
+  const deliveryFee = await getDeliveryFee(deliveryArea);
   const total = subtotal + deliveryFee;
 
   const order = await createOrderWithNumber({
     customerName,
     phone,
     address,
+    district,
+    deliveryArea,
     notes,
     items: orderItems,
     subtotal,
@@ -137,7 +150,14 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     return;
   }
 
-  const { customerName, phone, address, notes, items, source, deliveryFeeOverride, discount = 0 } = parsed.data;
+  const { customerName, phone, address, district, notes, items, source, deliveryFeeOverride, discount = 0 } = parsed.data;
+
+  const resolved = resolveDeliveryArea(district, parsed.data.deliveryArea);
+  if ('error' in resolved) {
+    res.status(400).json({ success: false, message: 'Invalid order data', errors: [`deliveryArea: ${resolved.error}`] });
+    return;
+  }
+  const deliveryArea = resolved.area;
 
   const built = await buildOrderItems(items);
 
@@ -157,7 +177,7 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     return;
   }
 
-  const deliveryFee = deliveryFeeOverride ?? getDeliveryFee();
+  const deliveryFee = deliveryFeeOverride ?? (await getDeliveryFee(deliveryArea));
   const total = subtotal - discount + deliveryFee;
 
   // Created as Pending like a website order: confirming it (Pending → Processing)
@@ -166,6 +186,8 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     customerName,
     phone,
     address,
+    district,
+    deliveryArea,
     notes,
     items: orderItems,
     subtotal,
@@ -202,7 +224,8 @@ const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancel
 const orderListQuerySchema = z.object({
   page: z.coerce.number().int().catch(1).transform((v) => Math.max(1, v)),
   limit: z.coerce.number().int().catch(20).transform((v) => Math.min(Math.max(1, v), 100)),
-  status: z.enum(ORDER_STATUSES).optional().catch(undefined)
+  status: z.enum(ORDER_STATUSES).optional().catch(undefined),
+  deliveryArea: z.enum(DELIVERY_AREAS).optional().catch(undefined)
 });
 
 // ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
@@ -213,7 +236,7 @@ const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const { page, limit, status } = orderListQuerySchema.parse(req.query);
+  const { page, limit, status, deliveryArea } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
   // Taken before the query: the client asks "changed since serverTime" next time, so a
   // change landing while this request runs is picked up then instead of being missed
@@ -228,9 +251,13 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
     return;
   }
 
-  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
+  const query: QueryFilter<IOrder> = {};
   if (status) {
     query.status = status;
+  }
+  if (deliveryArea) {
+    // Orders from before delivery areas have no field and were charged the inside-Dhaka fee
+    query.deliveryArea = deliveryArea === 'inside_dhaka' ? { $in: ['inside_dhaka', null] } : deliveryArea;
   }
   if (since.data) {
     query.updatedAt = { $gte: new Date(since.data) };
@@ -259,14 +286,17 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
 });
 
 // GET /api/orders/delivery-fee - The checkout page needs to SHOW the fee
-// before the customer places the order — this is the same server-side value
+// before the customer places the order — these are the same server-side values
 // that will be charged, so the number can never disagree with the API.
+// `deliveryFee` (inside Dhaka) stays for older clients; `zones` has every area
+// and `districts` is the list checkout offers.
 // Must be registered BEFORE GET /:orderNumber, or "delivery-fee" would be
 // captured as an orderNumber.
-router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void => {
+router.get('/delivery-fee', readLimiter, async (_req: Request, res: Response): Promise<void> => {
+  const zones = await getDeliveryFees();
   res.json({
     success: true,
-    data: { deliveryFee: getDeliveryFee() }
+    data: { deliveryFee: zones.inside_dhaka, zones, districts: DISTRICTS }
   });
 });
 
@@ -334,7 +364,9 @@ const orderDetailsSchema = z
     customerName: z.string().trim().min(1).max(100).optional(),
     phone: phoneSchema.optional(),
     address: z.string().trim().min(5).max(500).optional(),
-    notes: z.string().trim().max(500).optional()
+    notes: z.string().trim().max(500).optional(),
+    district: z.enum(DISTRICTS).optional(),
+    deliveryArea: z.enum(DELIVERY_AREAS).optional()
   })
   .refine((body) => Object.keys(body).length > 0, 'Send at least one field to update');
 
@@ -356,9 +388,47 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     return;
   }
 
+  const { district, deliveryArea, ...contact } = parsed.data;
+  const update: Record<string, unknown> = { ...contact };
+  // Changing where the parcel goes can change the fee, so it is only allowed
+  // before the order is confirmed; the API recomputes the fee and total.
+  const changesDelivery = district !== undefined || deliveryArea !== undefined;
+  let allowedStatuses: { $nin: OrderStatus[] } | OrderStatus = { $nin: FINAL_STATUSES };
+
+  if (changesDelivery) {
+    const current = await Order.findById(req.params.id).select('status district deliveryArea subtotal discount deliveryFee');
+    if (!current) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+    if (current.status !== 'Pending') {
+      res.status(409).json({ success: false, message: 'The delivery area can only be changed while the order is Pending' });
+      return;
+    }
+
+    const newDistrict = district ?? current.district;
+    // A new non-Dhaka district decides the area on its own; otherwise keep the current one
+    const requestedArea = deliveryArea ?? (district !== undefined ? undefined : current.deliveryArea);
+    const resolved = resolveDeliveryArea(newDistrict, requestedArea);
+    if ('error' in resolved) {
+      res.status(400).json({ success: false, message: 'Invalid order details', errors: [`deliveryArea: ${resolved.error}`] });
+      return;
+    }
+
+    update.district = newDistrict;
+    update.deliveryArea = resolved.area;
+    // Same area: the fee charged at checkout stands, even if the fee setting moved since
+    if (resolved.area !== (current.deliveryArea ?? 'inside_dhaka')) {
+      update.deliveryFee = await getDeliveryFee(resolved.area);
+      // A manual order's agreed discount stays; an agreed delivery fee is replaced by the area's fee
+      update.total = current.subtotal - (current.discount ?? 0) + (update.deliveryFee as number);
+    }
+    allowedStatuses = 'Pending';
+  }
+
   const order = await Order.findOneAndUpdate(
-    { _id: req.params.id, status: { $nin: FINAL_STATUSES } },
-    { $set: parsed.data },
+    { _id: req.params.id, status: allowedStatuses },
+    { $set: update },
     { returnDocument: 'after', runValidators: true }
   ).select('-__v');
 
@@ -366,7 +436,11 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     const exists = await Order.exists({ _id: req.params.id });
     res.status(exists ? 409 : 404).json({
       success: false,
-      message: exists ? 'Delivered or cancelled orders can no longer be edited' : 'Order not found'
+      message: !exists
+        ? 'Order not found'
+        : changesDelivery
+          ? 'The delivery area can only be changed while the order is Pending'
+          : 'Delivered or cancelled orders can no longer be edited'
     });
     return;
   }
@@ -571,11 +645,18 @@ router.post('/:id/courier/steadfast', requireAdmin, async (req: Request, res: Re
   const releaseClaim = () =>
     Order.updateOne({ _id: id, 'courier.trackingCode': { $exists: false } }, { $unset: { courier: 1 } });
 
-  if (claimed.address.length > STEADFAST_ADDRESS_MAX) {
+  // The courier sorts parcels by district, so add it when the address doesn't already name it
+  const district = claimed.district;
+  const recipientAddress =
+    district && !claimed.address.toLowerCase().includes(district.toLowerCase())
+      ? `${claimed.address}, ${district}`
+      : claimed.address;
+
+  if (recipientAddress.length > STEADFAST_ADDRESS_MAX) {
     await releaseClaim();
     res.status(400).json({
       success: false,
-      message: `Steadfast accepts addresses up to ${STEADFAST_ADDRESS_MAX} characters; this one has ${claimed.address.length}. Shorten it with Edit first.`
+      message: `Steadfast accepts addresses up to ${STEADFAST_ADDRESS_MAX} characters; this one has ${recipientAddress.length}${recipientAddress === claimed.address ? '' : ' with the district added'}. Shorten it with Edit first.`
     });
     return;
   }
@@ -586,7 +667,7 @@ router.post('/:id/courier/steadfast', requireAdmin, async (req: Request, res: Re
       invoice: claimed.orderNumber,
       recipientName: claimed.customerName,
       recipientPhone: claimed.phone,
-      recipientAddress: claimed.address,
+      recipientAddress,
       codAmount: claimed.total,
       note: claimed.notes
     });
