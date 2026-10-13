@@ -99,7 +99,7 @@ describe('Refused parcels: Shipped -> Returned', () => {
     expect(await stockOf(sareeId)).toBe(4);
   });
 
-  it('refuses a refund on a refused parcel, which was never paid for', async () => {
+  it('ignores refund fields: a refused parcel was never paid for', async () => {
     const orderId = await placeOrder([{ productId: sareeId, quantity: 1 }]);
     await moveTo(orderId, ['Processing', 'Shipped']);
 
@@ -110,53 +110,20 @@ describe('Refused parcels: Shipped -> Returned', () => {
       refundMethod: 'bKash'
     });
 
-    expect(res.status).toBe(400);
-    expect(await stockOf(sareeId)).toBe(4);
+    expect(res.status).toBe(200);
+    expect(res.body.data.refundAmount).toBeUndefined();
   });
 });
 
-describe('Returns after delivery: Delivered -> Returned', () => {
-  it('stamps deliveredAt, then restocks and records the refund', async () => {
-    const orderId = await placeOrder([{ productId: sareeId, quantity: 1 }]);
-    await moveTo(orderId, ['Processing', 'Shipped', 'Delivered']);
-    const delivered = await Order.findById(orderId).select('deliveredAt');
-    expect(delivered?.deliveredAt).toBeTruthy();
-
-    const res = await setStatus(orderId, {
-      status: 'Returned',
-      reason: 'Changed mind',
-      refundAmount: 3000,
-      refundMethod: 'bKash'
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body.data.refundAmount).toBe(3000);
-    expect(res.body.data.refundMethod).toBe('bKash');
-    expect(await stockOf(sareeId)).toBe(5);
-  });
-
-  it('refuses a refund larger than the order total', async () => {
+describe('No returns after delivery', () => {
+  it('keeps Delivered final', async () => {
     const orderId = await placeOrder([{ productId: sareeId, quantity: 1 }]);
     await moveTo(orderId, ['Processing', 'Shipped', 'Delivered']);
 
-    const res = await setStatus(orderId, {
-      status: 'Returned',
-      reason: 'Changed mind',
-      refundAmount: 999999,
-      refundMethod: 'Cash'
-    });
+    const res = await setStatus(orderId, { status: 'Returned', reason: 'Changed mind' });
 
-    expect(res.status).toBe(400);
-    const order = await Order.findById(orderId).select('status');
-    expect(order?.status).toBe('Delivered');
-  });
-
-  it('needs a refund method when a refund amount is given', async () => {
-    const orderId = await placeOrder([{ productId: sareeId, quantity: 1 }]);
-    await moveTo(orderId, ['Processing', 'Shipped', 'Delivered']);
-
-    const res = await setStatus(orderId, { status: 'Returned', reason: 'Changed mind', refundAmount: 3000 });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(409);
+    expect(await stockOf(sareeId)).toBe(4);
   });
 });
 
@@ -200,9 +167,9 @@ describe('Return rules', () => {
       { productId: sareeId, quantity: 1 },
       { productId: preorderId, quantity: 1 }
     ]);
-    await moveTo(orderId, ['Processing', 'Shipped', 'Delivered']);
+    await moveTo(orderId, ['Processing', 'Shipped']);
 
-    const res = await setStatus(orderId, { status: 'Returned', reason: 'Changed mind' });
+    const res = await setStatus(orderId, { status: 'Returned', reason: 'Customer refused' });
 
     expect(res.status).toBe(200);
     expect(await stockOf(sareeId)).toBe(5);

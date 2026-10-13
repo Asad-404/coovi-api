@@ -12,9 +12,6 @@ export interface IOrderItem {
   preorderDays?: number;
 }
 
-export const REFUND_METHODS = ['bKash', 'Nagad', 'Cash', 'Bank transfer', 'Store credit'] as const;
-export type RefundMethod = (typeof REFUND_METHODS)[number];
-
 export interface IOrder extends Document {
   orderNumber: string;
   customerName: string;
@@ -27,15 +24,11 @@ export interface IOrder extends Document {
   status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled' | 'Returned';
   paymentMethod: string;
   notes?: string;
-  // Why the order was cancelled or came back (set on Cancelled and Returned)
+  // Why the order was cancelled or the parcel came back (set on Cancelled and Returned)
   cancelReason?: string;
-  deliveredAt?: Date;
   returnedAt?: Date;
-  // Whether stock was put back when the order was returned
+  // Whether stock was put back when the parcel came back
   restocked?: boolean;
-  // Money given back for a return after delivery (a refused parcel was never paid for)
-  refundAmount?: number;
-  refundMethod?: RefundMethod;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -103,11 +96,8 @@ const OrderSchema = new Schema<IOrder>(
       trim: true
     },
     cancelReason: { type: String, trim: true, maxlength: 300 },
-    deliveredAt: { type: Date },
     returnedAt: { type: Date },
-    restocked: { type: Boolean },
-    refundAmount: { type: Number, min: 0 },
-    refundMethod: { type: String, enum: REFUND_METHODS }
+    restocked: { type: Boolean }
   },
   {
     timestamps: true
