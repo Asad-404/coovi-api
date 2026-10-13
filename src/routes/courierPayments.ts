@@ -15,9 +15,10 @@ router.use(requireAdmin);
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 const money = z.number().min(0).max(10_000_000).transform(round2);
 
-// A parcel can be on a statement once the courier has it: Delivered, or still
-// Shipped when the customer refused it and the courier only charges the return
-const PAYABLE_STATUSES = ['Shipped', 'Delivered'];
+// A parcel can be on a statement once the courier has it: Delivered, Returned
+// (refused at the door, the courier only charges the return), or still Shipped
+// when the statement arrives before the order status is updated
+const PAYABLE_STATUSES = ['Shipped', 'Delivered', 'Returned'];
 
 const paymentBodySchema = z.strictObject({
   courier: z.string().trim().min(1).max(50).optional(),
@@ -160,7 +161,7 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
     res.status(400).json({
       success: false,
       message:
-        'Only shipped or delivered orders can be paid for by the courier: ' +
+        'Only shipped, delivered or returned orders can be on a courier payment: ' +
         notWithCourier.map((o) => `${o.orderNumber} is ${o.status}`).join(', ')
     });
     return;

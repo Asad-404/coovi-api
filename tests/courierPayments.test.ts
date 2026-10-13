@@ -13,7 +13,7 @@ let productId = '';
 const auth = (req: request.Test) => req.set('Authorization', `Bearer ${token}`);
 
 // Places an order through the real checkout and walks it to the given status
-async function orderWithStatus(status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled') {
+async function orderWithStatus(status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled' | 'Returned') {
   const res = await request(app).post('/api/orders').send({
     customerName: 'Courier Test Customer',
     phone: '01712345678',
@@ -28,10 +28,13 @@ async function orderWithStatus(status: 'Pending' | 'Processing' | 'Shipped' | 'D
     Processing: ['Processing'],
     Shipped: ['Processing', 'Shipped'],
     Delivered: ['Processing', 'Shipped', 'Delivered'],
-    Cancelled: ['Cancelled']
+    Cancelled: ['Cancelled'],
+    Returned: ['Processing', 'Shipped', 'Returned']
   };
   for (const next of path[status]) {
-    const step = await auth(request(app).patch(`/api/orders/${id}/status`)).send({ status: next });
+    const step = await auth(request(app).patch(`/api/orders/${id}/status`)).send(
+      next === 'Returned' ? { status: next, reason: 'Refused at the door' } : { status: next }
+    );
     expect(step.status).toBe(200);
   }
   return { id: id as string, orderNumber: orderNumber as string, total: total as number };
@@ -112,8 +115,8 @@ describe('POST /api/courier-payments', () => {
     expect(res.body.data.difference).toBe(900 - (a.total - 60));
   });
 
-  it('accepts a refused parcel still marked Shipped with only a return charge', async () => {
-    const returned = await orderWithStatus('Shipped');
+  it.each(['Returned', 'Shipped'] as const)('accepts a refused parcel marked %s with only a return charge', async (status) => {
+    const returned = await orderWithStatus(status);
     const res = await record({
       paidAt: '2026-10-10',
       lines: [{ orderNumber: returned.orderNumber, collected: 0, charge: 50 }]
@@ -190,6 +193,7 @@ describe('GET /api/courier-payments/unpaid', () => {
     const unpaid1 = await orderWithStatus('Delivered');
     const unpaid2 = await orderWithStatus('Delivered');
     await orderWithStatus('Shipped');
+    await orderWithStatus('Returned');
     await orderWithStatus('Pending');
 
     await record({ paidAt: '2026-10-10', lines: [{ orderNumber: paid.orderNumber, collected: paid.total, charge: 60 }] });
