@@ -37,7 +37,8 @@ const productFields = {
   price: z.number().int().min(1),
   // Original price before a discount; null clears it. When it is greater than `price` the product is on sale
   compareAtPrice: z.number().int().min(0).nullable().optional(),
-  images: z.array(z.url()).min(1),
+  // https only: z.url() alone would also accept javascript: and data: addresses
+  images: z.array(z.url({ protocol: /^https$/, message: 'must be an https:// address' })).min(1),
   size: z.string().max(50).optional(),
   category: z.string().min(1).max(50),
   stock: z.number().int().min(0),

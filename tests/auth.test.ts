@@ -34,6 +34,21 @@ describe('POST /api/auth/login', () => {
     const res = await request(app).post('/api/auth/login').send({ email: TEST_ADMIN.email });
     expect(res.status).toBe(400);
   });
+
+  it('returns 400, not 500, when the password is not text', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: TEST_ADMIN.email, password: { $ne: '' } });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Email and password are required');
+  });
+
+  it('returns 400 when the email is not text', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: { $gt: '' }, password: TEST_ADMIN.password });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe('GET /api/auth/me', () => {

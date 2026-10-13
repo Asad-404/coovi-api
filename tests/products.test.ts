@@ -106,6 +106,19 @@ describe('POST /api/products (body validation)', () => {
     expect(res.status).toBe(400);
   });
 
+  it.each(['javascript:alert(1)', 'data:text/html,hi', 'http://example.com/saree.jpg'])(
+    'rejects a non-https image address (%s)',
+    async (image) => {
+      const token = await getAdminToken();
+      const res = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ ...VALID_PRODUCT, slug: 'bad-image-saree', images: [image] });
+      expect(res.status).toBe(400);
+      expect(res.body.errors.join(' ')).toMatch(/images/);
+    }
+  );
+
   it('creates a product for a valid body + token', async () => {
     const token = await getAdminToken();
     const res = await request(app)

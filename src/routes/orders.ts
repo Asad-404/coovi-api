@@ -23,7 +23,8 @@ const router = Router();
 
 // Admin-only fields. Every response a customer can see (placing an order,
 // public tracking) leaves these out; the admin routes return everything.
-export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked'] as const;
+// createdBy is the email an admin signs in with, so a customer must never see it.
+export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked', 'createdBy'] as const;
 const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`)].join(' ');
 
 const toPublicOrder = (order: IOrder) => {
