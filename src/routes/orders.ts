@@ -1,21 +1,40 @@
+import { randomInt } from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
+import { notifyNewOrder } from '../services/notify';
 
 const router = Router();
 
-// Generate order number
-const generateOrderNumber = (): string => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `ORD-${year}${month}${day}-${random}`;
+// Order number + phone are a guest's only credentials for viewing an order, so
+// the random part must be unguessable: 6 characters from a 30-letter alphabet
+// (no look-alikes 0/O, 1/I/L, and no U) is ~729 million per day, drawn with a
+// cryptographic RNG. The date is the shop's day in Bangladesh (UTC+6), not UTC.
+const ORDER_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
+const ORDER_CODE_LENGTH = 6;
+
+export const generateOrderNumber = (now: Date = new Date()): string => {
+  const date = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dhaka',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  })
+    .format(now)
+    .replace(/-/g, '');
+  let code = '';
+  for (let i = 0; i < ORDER_CODE_LENGTH; i++) {
+    code += ORDER_CODE_ALPHABET[randomInt(ORDER_CODE_ALPHABET.length)];
+  }
+  return `ORD-${date}-${code}`;
 };
+
+// Guest phone, same rule as checkout. Shared with the lookup so the query can
+// only ever be one plain phone string.
+const phoneSchema = z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01');
 
 // Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
 // decides what it pays. Read at call time so tests and deploys can change it.
@@ -30,7 +49,7 @@ const getDeliveryFee = (): number => {
 // them, so a spoofed "total: 1" can't be stored no matter what the client sends.
 const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
-  phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01'),
+  phone: phoneSchema,
   address: z.string().min(5).max(500),
   notes: z.string().max(500).optional(),
   items: z
@@ -114,7 +133,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   const deliveryFee = getDeliveryFee();
   const total = subtotal + deliveryFee;
 
-  // The unique orderNumber index can reject a random collision (1-in-1000/day) —
+  // The unique orderNumber index can (very rarely) reject a random collision —
   // generating a fresh number and retrying is friendlier than erroring
   let order = null;
   for (let attempt = 0; attempt < 3 && !order; attempt++) {
@@ -150,6 +169,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     data: order,
     message: 'Order placed successfully'
   });
+
+  // Alert the owner after the customer has their answer; notifyNewOrder never throws
+  void notifyNewOrder(order);
 });
 
 type OrderStatus = IOrder['status'];
@@ -164,19 +186,40 @@ const orderListQuerySchema = z.object({
   status: z.enum(ORDER_STATUSES).optional().catch(undefined)
 });
 
+// ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
+// so the admin can keep its list fresh without downloading every order each minute.
+// Unlike the lenient fields above, a bad time is a 400: silently ignoring it would
+// return the whole list and hide the client's bug.
+const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
+  // Taken before the query: the client asks "changed since serverTime" next time, so a
+  // change landing while this request runs is picked up then instead of being missed
+  const serverTime = new Date().toISOString();
 
-  const query: { status?: OrderStatus } = {};
+  const since = updatedSinceSchema.safeParse(req.query.updatedSince);
+  if (!since.success) {
+    res.status(400).json({
+      success: false,
+      message: 'updatedSince must be an ISO date-time, e.g. 2026-10-13T07:45:00.000Z'
+    });
+    return;
+  }
+
+  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
   if (status) {
     query.status = status;
   }
+  if (since.data) {
+    query.updatedAt = { $gte: new Date(since.data) };
+  }
 
-  // Execute query
+  // Execute query (changes come oldest first so paging through them is stable)
   const orders = await Order.find(query)
-    .sort({ createdAt: -1 })
+    .sort(since.data ? { updatedAt: 1, _id: 1 } : { createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .select('-__v');
@@ -186,6 +229,7 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   res.json({
     success: true,
     data: orders,
+    serverTime,
     pagination: {
       page,
       limit,
@@ -213,9 +257,8 @@ router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void =>
 // so nobody can probe which order numbers exist.)
 router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Response): Promise<void> => {
   const { orderNumber } = req.params;
-  const phone = req.query.phone as string | undefined;
 
-  if (!phone) {
+  if (req.query.phone === undefined) {
     res.status(400).json({
       success: false,
       message: 'Phone number is required to view an order'
@@ -223,7 +266,19 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone }).select('-__v');
+  // Exactly one well-formed phone. Repeated ?phone=a&phone=b arrives as an
+  // array, which Mongoose would turn into "phone is a OR b" and let one request
+  // try many phones; ?phone[$ne]=x arrives as an object. Both are refused here.
+  const phone = phoneSchema.safeParse(req.query.phone);
+  if (!phone.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Send one phone number: 11 digits starting with 01'
+    });
+    return;
+  }
+
+  const order = await Order.findOne({ orderNumber, phone: phone.data }).select('-__v');
 
   if (!order) {
     res.status(404).json({
@@ -261,7 +316,7 @@ export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
 const orderDetailsSchema = z
   .strictObject({
     customerName: z.string().trim().min(1).max(100).optional(),
-    phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01').optional(),
+    phone: phoneSchema.optional(),
     address: z.string().trim().min(5).max(500).optional(),
     notes: z.string().trim().max(500).optional()
   })
