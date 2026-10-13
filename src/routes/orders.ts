@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
+import { Types } from 'mongoose';
 import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { actor, requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
@@ -19,6 +20,18 @@ import { notifyNewOrder } from '../services/notify';
 export { generateOrderNumber } from '../services/orderPricing';
 
 const router = Router();
+
+// Admin-only fields. Every response a customer can see (placing an order,
+// public tracking) leaves these out; the admin routes return everything.
+export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory'] as const;
+const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`)].join(' ');
+
+const toPublicOrder = (order: IOrder) => {
+  const data: Record<string, unknown> = order.toObject();
+  delete data.__v;
+  for (const field of PRIVATE_ORDER_FIELDS) delete data[field];
+  return data;
+};
 
 // Guest phone, same rule as checkout. Shared with the lookup so the query can
 // only ever be one plain phone string.
@@ -93,7 +106,8 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     deliveryFee,
     total,
     paymentMethod: 'Cash on Delivery',
-    status: 'Pending'
+    status: 'Pending',
+    statusHistory: [{ to: 'Pending', by: 'customer', at: new Date() }]
   });
 
   if (!order) {
@@ -106,7 +120,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   res.status(201).json({
     success: true,
-    data: order,
+    data: toPublicOrder(order),
     message: 'Order placed successfully'
   });
 
@@ -191,7 +205,8 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     paymentMethod: 'Cash on Delivery',
     status: 'Pending',
     source,
-    createdBy: req.admin?.email
+    createdBy: req.admin?.email,
+    statusHistory: [{ to: 'Pending', ...actor(req), at: new Date() }]
   });
 
   if (!order) {
@@ -321,7 +336,7 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone: phone.data }).select('-__v');
+  const order = await Order.findOne({ orderNumber, phone: phone.data }).select(PUBLIC_ORDER_SELECT);
 
   if (!order) {
     res.status(404).json({
@@ -387,19 +402,24 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
   // Changing where the parcel goes can change the fee, so it is only allowed
   // before the order is confirmed; the API recomputes the fee and total.
   const changesDelivery = district !== undefined || deliveryArea !== undefined;
-  let allowedStatuses: { $nin: OrderStatus[] } | OrderStatus = { $nin: FINAL_STATUSES };
+
+  const current = await Order.findById(req.params.id)
+    .select('status customerName phone address notes district deliveryArea subtotal discount deliveryFee total')
+    .lean();
+  if (!current) {
+    res.status(404).json({ success: false, message: 'Order not found' });
+    return;
+  }
+  if (changesDelivery && current.status !== 'Pending') {
+    res.status(409).json({ success: false, message: 'The delivery area can only be changed while the order is Pending' });
+    return;
+  }
+  if (FINAL_STATUSES.includes(current.status)) {
+    res.status(409).json({ success: false, message: 'Delivered or cancelled orders can no longer be edited' });
+    return;
+  }
 
   if (changesDelivery) {
-    const current = await Order.findById(req.params.id).select('status district deliveryArea subtotal discount deliveryFee');
-    if (!current) {
-      res.status(404).json({ success: false, message: 'Order not found' });
-      return;
-    }
-    if (current.status !== 'Pending') {
-      res.status(409).json({ success: false, message: 'The delivery area can only be changed while the order is Pending' });
-      return;
-    }
-
     const newDistrict = district ?? current.district;
     // A new non-Dhaka district decides the area on its own; otherwise keep the current one
     const requestedArea = deliveryArea ?? (district !== undefined ? undefined : current.deliveryArea);
@@ -417,24 +437,35 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
       // A manual order's agreed discount stays; an agreed delivery fee is replaced by the area's fee
       update.total = current.subtotal - (current.discount ?? 0) + (update.deliveryFee as number);
     }
-    allowedStatuses = 'Pending';
   }
 
+  // Keep a before/after record of every field that really changes,
+  // including a delivery fee and total the API recomputed
+  const before = current as unknown as Record<string, unknown>;
+  const text = (value: unknown) => (value === undefined || value === null ? undefined : String(value));
+  const changes = Object.keys(update)
+    .filter((field) => (text(before[field]) ?? '') !== (text(update[field]) ?? ''))
+    .map((field) => ({ field, from: text(before[field]), to: text(update[field]) }));
+
+  // The filter also matches the status and the values just read, so a change
+  // made by someone else in between gets a 409 instead of a wrong "from" value
   const order = await Order.findOneAndUpdate(
-    { _id: req.params.id, status: allowedStatuses },
-    { $set: update },
+    {
+      _id: req.params.id,
+      status: current.status,
+      ...Object.fromEntries(changes.map((c) => [c.field, before[c.field] ?? { $exists: false }]))
+    },
+    {
+      $set: update,
+      ...(changes.length && { $push: { editHistory: { changes, ...actor(req), at: new Date() } } })
+    },
     { returnDocument: 'after', runValidators: true }
   ).select('-__v');
 
   if (!order) {
-    const exists = await Order.exists({ _id: req.params.id });
-    res.status(exists ? 409 : 404).json({
+    res.status(409).json({
       success: false,
-      message: !exists
-        ? 'Order not found'
-        : changesDelivery
-          ? 'The delivery area can only be changed while the order is Pending'
-          : 'Delivered or cancelled orders can no longer be edited'
+      message: 'This order was just changed by someone else — reload and try again'
     });
     return;
   }
@@ -490,9 +521,15 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
   // Claim the transition atomically: the filter only matches while the order
   // is still in oldStatus, so two admins clicking at once can't both take (or
   // both return) the stock — the second one gets a 409.
+  // The history entry is written in the same update, so a status change and
+  // its record can never disagree.
+  const historyId = new Types.ObjectId();
   const order = await Order.findOneAndUpdate(
     { _id: id, status: oldStatus },
-    { $set: { status } },
+    {
+      $set: { status },
+      $push: { statusHistory: { _id: historyId, from: oldStatus, to: status, ...actor(req), at: new Date() } }
+    },
     { returnDocument: 'after' }
   ).select('-__v');
 
@@ -536,7 +573,10 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
         for (const t of taken) {
           await Product.updateOne({ _id: t.productId }, { $inc: { stock: t.quantity } });
         }
-        await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
+        await Order.updateOne(
+          { _id: id, status },
+          { $set: { status: oldStatus }, $pull: { statusHistory: { _id: historyId } } }
+        );
 
         res.status(409).json({
           success: false,
@@ -572,6 +612,42 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     success: true,
     data: order,
     message: 'Order status updated successfully'
+  });
+});
+
+const noteBodySchema = z.object({ text: z.string().trim().min(1).max(500) });
+
+// POST /api/orders/:id/notes - Add a private note (Admin only - JWT required).
+// Allowed at any status: a call after delivery about a return still needs writing down.
+router.post('/:id/notes', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+  const parsed = noteBodySchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Note must be 1 to 500 characters'
+    });
+    return;
+  }
+
+  const order = await Order.findByIdAndUpdate(
+    req.params.id,
+    { $push: { internalNotes: { text: parsed.data.text, ...actor(req), at: new Date() } } },
+    { returnDocument: 'after' }
+  ).select('-__v');
+
+  if (!order) {
+    res.status(404).json({
+      success: false,
+      message: 'Order not found'
+    });
+    return;
+  }
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    message: 'Note added'
   });
 });
 
