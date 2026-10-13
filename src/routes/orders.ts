@@ -1,11 +1,24 @@
 import { Router, Request, Response } from 'express';
+import { Types } from 'mongoose';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { actor, requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
 
 const router = Router();
+
+// Admin-only fields. Every response a customer can see (placing an order,
+// public tracking) leaves these out; the admin routes return everything.
+export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory'] as const;
+const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`)].join(' ');
+
+const toPublicOrder = (order: IOrder) => {
+  const data: Record<string, unknown> = order.toObject();
+  delete data.__v;
+  for (const field of PRIVATE_ORDER_FIELDS) delete data[field];
+  return data;
+};
 
 // Generate order number
 const generateOrderNumber = (): string => {
@@ -130,7 +143,8 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
         deliveryFee,
         total,
         paymentMethod: 'Cash on Delivery',
-        status: 'Pending'
+        status: 'Pending',
+        statusHistory: [{ to: 'Pending', by: 'customer', at: new Date() }]
       });
     } catch (error: any) {
       if (error.code !== 11000) throw error;
@@ -147,7 +161,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   res.status(201).json({
     success: true,
-    data: order,
+    data: toPublicOrder(order),
     message: 'Order placed successfully'
   });
 });
@@ -223,7 +237,7 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone }).select('-__v');
+  const order = await Order.findOne({ orderNumber, phone }).select(PUBLIC_ORDER_SELECT);
 
   if (!order) {
     res.status(404).json({
@@ -282,11 +296,42 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     return;
   }
 
-  const order = await Order.findOneAndUpdate(
-    { _id: req.params.id, status: { $nin: FINAL_STATUSES } },
-    { $set: parsed.data },
-    { returnDocument: 'after', runValidators: true }
-  ).select('-__v');
+  const current = await Order.findOne({ _id: req.params.id, status: { $nin: FINAL_STATUSES } })
+    .select('customerName phone address notes')
+    .lean();
+
+  // Keep a before/after record of every field that really changes
+  const fields = Object.keys(parsed.data) as (keyof typeof parsed.data)[];
+  const changes = current
+    ? fields
+        .filter((field) => (current[field] ?? '') !== (parsed.data[field] ?? ''))
+        .map((field) => ({ field, from: current[field], to: parsed.data[field] }))
+    : [];
+
+  // The filter also matches the values just read, so an edit made by someone
+  // else in between can't end up recorded with the wrong "from" value
+  const order = current
+    ? await Order.findOneAndUpdate(
+        {
+          _id: req.params.id,
+          status: { $nin: FINAL_STATUSES },
+          ...Object.fromEntries(changes.map((c) => [c.field, c.from ?? { $exists: false }]))
+        },
+        {
+          $set: parsed.data,
+          ...(changes.length && { $push: { editHistory: { changes, ...actor(req), at: new Date() } } })
+        },
+        { returnDocument: 'after', runValidators: true }
+      ).select('-__v')
+    : null;
+
+  if (!order && current) {
+    res.status(409).json({
+      success: false,
+      message: 'This order was just changed by someone else — reload and try again'
+    });
+    return;
+  }
 
   if (!order) {
     const exists = await Order.exists({ _id: req.params.id });
@@ -348,9 +393,15 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
   // Claim the transition atomically: the filter only matches while the order
   // is still in oldStatus, so two admins clicking at once can't both take (or
   // both return) the stock — the second one gets a 409.
+  // The history entry is written in the same update, so a status change and
+  // its record can never disagree.
+  const historyId = new Types.ObjectId();
   const order = await Order.findOneAndUpdate(
     { _id: id, status: oldStatus },
-    { $set: { status } },
+    {
+      $set: { status },
+      $push: { statusHistory: { _id: historyId, from: oldStatus, to: status, ...actor(req), at: new Date() } }
+    },
     { returnDocument: 'after' }
   ).select('-__v');
 
@@ -394,7 +445,10 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
         for (const t of taken) {
           await Product.updateOne({ _id: t.productId }, { $inc: { stock: t.quantity } });
         }
-        await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
+        await Order.updateOne(
+          { _id: id, status },
+          { $set: { status: oldStatus }, $pull: { statusHistory: { _id: historyId } } }
+        );
 
         res.status(409).json({
           success: false,
@@ -430,6 +484,42 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     success: true,
     data: order,
     message: 'Order status updated successfully'
+  });
+});
+
+const noteBodySchema = z.object({ text: z.string().trim().min(1).max(500) });
+
+// POST /api/orders/:id/notes - Add a private note (Admin only - JWT required).
+// Allowed at any status: a call after delivery about a return still needs writing down.
+router.post('/:id/notes', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+  const parsed = noteBodySchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Note must be 1 to 500 characters'
+    });
+    return;
+  }
+
+  const order = await Order.findByIdAndUpdate(
+    req.params.id,
+    { $push: { internalNotes: { text: parsed.data.text, ...actor(req), at: new Date() } } },
+    { returnDocument: 'after' }
+  ).select('-__v');
+
+  if (!order) {
+    res.status(404).json({
+      success: false,
+      message: 'Order not found'
+    });
+    return;
+  }
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    message: 'Note added'
   });
 });
 

@@ -12,6 +12,30 @@ export interface IOrderItem {
   preorderDays?: number;
 }
 
+// "by" is the admin's email, or 'customer' for the order being placed.
+// byId is the admin's id, kept so a later email change can't hide who it was.
+export interface IOrderNote {
+  text: string;
+  by: string;
+  byId?: string;
+  at: Date;
+}
+
+export interface IStatusChange {
+  from?: IOrder['status'];
+  to: IOrder['status'];
+  by: string;
+  byId?: string;
+  at: Date;
+}
+
+export interface IDetailEdit {
+  changes: { field: string; from?: string; to?: string }[];
+  by: string;
+  byId?: string;
+  at: Date;
+}
+
 export interface IOrder extends Document {
   orderNumber: string;
   customerName: string;
@@ -24,9 +48,15 @@ export interface IOrder extends Document {
   status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled';
   paymentMethod: string;
   notes?: string;
+  // Admin-only (see PRIVATE_ORDER_FIELDS in routes/orders.ts): never shown to the customer
+  internalNotes: IOrderNote[];
+  statusHistory: IStatusChange[];
+  editHistory: IDetailEdit[];
   createdAt: Date;
   updatedAt: Date;
 }
+
+const ORDER_STATUS_VALUES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
 
 const OrderSchema = new Schema<IOrder>(
   {
@@ -89,6 +119,41 @@ const OrderSchema = new Schema<IOrder>(
     notes: {
       type: String,
       trim: true
+    },
+    // Append-only: no route edits or deletes these, so the record can be trusted.
+    // Orders placed before this existed simply have empty arrays.
+    internalNotes: {
+      type: [{
+        text: { type: String, required: true, trim: true, maxlength: 500 },
+        by: { type: String, required: true },
+        byId: { type: String },
+        at: { type: Date, required: true, default: Date.now }
+      }],
+      default: []
+    },
+    statusHistory: {
+      type: [{
+        from: { type: String, enum: ORDER_STATUS_VALUES },
+        to: { type: String, enum: ORDER_STATUS_VALUES, required: true },
+        by: { type: String, required: true },
+        byId: { type: String },
+        at: { type: Date, required: true, default: Date.now }
+      }],
+      default: []
+    },
+    editHistory: {
+      type: [{
+        changes: [{
+          _id: false,
+          field: { type: String, required: true },
+          from: { type: String },
+          to: { type: String }
+        }],
+        by: { type: String, required: true },
+        byId: { type: String },
+        at: { type: Date, required: true, default: Date.now }
+      }],
+      default: []
     }
   },
   {
