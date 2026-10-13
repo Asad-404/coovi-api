@@ -14,7 +14,7 @@ import {
   resolveDeliveryArea
 } from '../services/deliveryFees';
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
-import { notifyNewOrder } from '../services/notify';
+import { alertNewOrder } from '../services/notify';
 
 // Re-exported so tests keep importing it from the route
 export { generateOrderNumber } from '../services/orderPricing';
@@ -125,8 +125,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     message: 'Order placed successfully'
   });
 
-  // Alert the owner after the customer has their answer; notifyNewOrder never throws
-  void notifyNewOrder(order);
+  // Alert the owner after the customer has their answer; alertNewOrder never throws
+  // and groups orders that arrive close together into one email
+  void alertNewOrder(order);
 });
 
 export const ORDER_SOURCES = ['facebook', 'whatsapp', 'phone', 'other'] as const;
