@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
-import Order, { type IOrder } from '../models/Order';
+import Order, { REFUND_METHODS, type IOrder } from '../models/Order';
 import Product from '../models/Product';
 
 const router = Router();
@@ -154,7 +154,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
 type OrderStatus = IOrder['status'];
 
-const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'] as const;
+const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Returned'] as const;
 
 // Same lenient query handling as GET /api/products: bad values fall back to
 // defaults instead of erroring (a negative page used to reach Mongo as a negative skip)
@@ -240,15 +240,17 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
 });
 
 // Orders only move forward. Stock is taken on Pending → Processing and given
-// back on Processing → Cancelled; every other jump (back to Pending, cancelling
-// after shipping, reopening a delivered order) would take or return stock twice
-// or not at all, so it is refused.
+// back on Processing → Cancelled or on Returned (a parcel refused at the door is
+// Shipped → Returned; a return after delivery is Delivered → Returned). Every
+// other jump (back to Pending, cancelling after shipping, reopening a delivered
+// order) would take or return stock twice or not at all, so it is refused.
 export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
   Pending: ['Processing', 'Cancelled'],
   Processing: ['Shipped', 'Cancelled'],
-  Shipped: ['Delivered'],
-  Delivered: [],
-  Cancelled: []
+  Shipped: ['Delivered', 'Returned'],
+  Delivered: ['Returned'],
+  Cancelled: [],
+  Returned: []
 };
 
 // Admin can correct contact/delivery details after a customer calls. Items,
@@ -264,8 +266,8 @@ const orderDetailsSchema = z
   })
   .refine((body) => Object.keys(body).length > 0, 'Send at least one field to update');
 
-// Delivered and Cancelled orders are history — their details are frozen
-const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled'];
+// Delivered, Cancelled and Returned orders are history — their details are frozen
+const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled', 'Returned'];
 
 // PATCH /api/orders/:id - Edit customer/delivery details (Admin only - JWT required)
 router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
@@ -292,7 +294,7 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     const exists = await Order.exists({ _id: req.params.id });
     res.status(exists ? 409 : 404).json({
       success: false,
-      message: exists ? 'Delivered or cancelled orders can no longer be edited' : 'Order not found'
+      message: exists ? 'Delivered, cancelled or returned orders can no longer be edited' : 'Order not found'
     });
     return;
   }
@@ -304,7 +306,46 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
   });
 });
 
-const statusBodySchema = z.object({ status: z.enum(ORDER_STATUSES) });
+// reason: why an order is cancelled or returned (required for Returned).
+// restock: whether a returned parcel goes back on sale (default yes; untick it
+// when the saree came back damaged). refundAmount/refundMethod: money given
+// back for a return after delivery; a refused parcel was never paid for.
+// Returns an error message when the extra fields don't fit the transition
+function checkStatusExtras(
+  oldStatus: OrderStatus,
+  status: OrderStatus,
+  body: { reason?: string; restock?: boolean; refundAmount?: number; refundMethod?: string },
+  orderTotal: number
+): string | null {
+  if (status === 'Returned' && !body.reason) {
+    return 'Say why the order came back (reason is required for Returned)';
+  }
+  if (body.reason && status !== 'Cancelled' && status !== 'Returned') {
+    return 'A reason can only be given when cancelling or returning an order';
+  }
+  if (body.restock !== undefined && status !== 'Returned') {
+    return 'restock only applies to Returned';
+  }
+  const hasRefund = body.refundAmount !== undefined || body.refundMethod !== undefined;
+  if (hasRefund && !(oldStatus === 'Delivered' && status === 'Returned')) {
+    return 'A refund can only be recorded for a return after delivery (a refused parcel was never paid for)';
+  }
+  if (body.refundAmount !== undefined && body.refundAmount > orderTotal) {
+    return `Refund can't be more than the order total (${orderTotal})`;
+  }
+  if (body.refundAmount && !body.refundMethod) {
+    return 'Say how the refund was paid (refundMethod)';
+  }
+  return null;
+}
+
+const statusBodySchema = z.object({
+  status: z.enum(ORDER_STATUSES),
+  reason: z.string().trim().min(1).max(300).optional(),
+  restock: z.boolean().optional(),
+  refundAmount: z.number().int().min(0).optional(),
+  refundMethod: z.enum(REFUND_METHODS).optional()
+});
 
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
 router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
@@ -319,8 +360,8 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     return;
   }
 
-  const { status } = parsed.data;
-  const current = await Order.findById(id).select('status');
+  const { status, reason, restock = true, refundAmount, refundMethod } = parsed.data;
+  const current = await Order.findById(id).select('status total');
 
   if (!current) {
     res.status(404).json({
@@ -345,12 +386,32 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     return;
   }
 
+  const extraError = checkStatusExtras(oldStatus, status, parsed.data, current.total);
+  if (extraError) {
+    res.status(400).json({
+      success: false,
+      message: extraError
+    });
+    return;
+  }
+
+  const changes: Record<string, unknown> = { status };
+  if (status === 'Delivered') changes.deliveredAt = new Date();
+  if (status === 'Cancelled' && reason) changes.cancelReason = reason;
+  if (status === 'Returned') {
+    changes.cancelReason = reason;
+    changes.returnedAt = new Date();
+    changes.restocked = restock;
+    if (refundAmount !== undefined) changes.refundAmount = refundAmount;
+    if (refundMethod) changes.refundMethod = refundMethod;
+  }
+
   // Claim the transition atomically: the filter only matches while the order
   // is still in oldStatus, so two admins clicking at once can't both take (or
   // both return) the stock — the second one gets a 409.
   const order = await Order.findOneAndUpdate(
     { _id: id, status: oldStatus },
-    { $set: { status } },
+    { $set: changes },
     { returnDocument: 'after' }
   ).select('-__v');
 
@@ -418,8 +479,13 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     }
   }
 
-  // Cancelling a confirmed order puts its stock back (pre-order lines took none)
-  if (oldStatus === 'Processing' && status === 'Cancelled') {
+  // Cancelling a confirmed order puts its stock back, and so does a returned
+  // parcel unless the admin said it can't be sold again. Every order that
+  // reaches Shipped went through Processing, so its stock was taken.
+  // Pre-order lines took none, so they give none back.
+  const returnsStock =
+    (oldStatus === 'Processing' && status === 'Cancelled') || (status === 'Returned' && restock);
+  if (returnsStock) {
     for (const item of order.items) {
       if (item.preorder) continue;
       await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
