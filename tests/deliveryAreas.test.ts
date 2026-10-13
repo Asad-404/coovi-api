@@ -210,3 +210,31 @@ describe('GET /api/orders?deliveryArea=', () => {
     expect(outside.body.data[0].district).toBe('Barishal');
   });
 });
+
+describe('manual orders and delivery areas', () => {
+  const postManual = (extra: object) =>
+    request(app)
+      .post('/api/orders/manual')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...orderBody(extra), source: 'phone' });
+
+  it('charges the area fee unless the admin agreed another one', async () => {
+    const byArea = await postManual({ district: 'Sylhet' });
+    expect(byArea.status).toBe(201);
+    expect(byArea.body.data.deliveryArea).toBe('outside_dhaka');
+    expect(byArea.body.data.deliveryFee).toBe(130);
+
+    const agreed = await postManual({ district: 'Sylhet', deliveryFeeOverride: 50 });
+    expect(agreed.body.data.deliveryFee).toBe(50);
+  });
+
+  it('keeps the discount when the area changes', async () => {
+    const placed = await postManual({ district: 'Dhaka', discount: 200 });
+    expect(placed.body.data.total).toBe(1000 - 200 + 70);
+
+    const res = await editOrder(placed.body.data._id, { district: 'Khulna' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.deliveryFee).toBe(130);
+    expect(res.body.data.total).toBe(1000 - 200 + 130);
+  });
+});

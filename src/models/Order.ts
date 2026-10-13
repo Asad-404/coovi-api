@@ -23,11 +23,17 @@ export interface IOrder extends Document {
   deliveryArea: DeliveryArea;
   items: IOrderItem[];
   subtotal: number;
+  // Taka off the items, agreed by an admin on a manual order (0 for website orders)
+  discount: number;
   deliveryFee: number;
   total: number;
   status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled';
   paymentMethod: string;
   notes?: string;
+  // Where the order came from: the website checkout, or entered by an admin
+  source: 'website' | 'facebook' | 'whatsapp' | 'phone' | 'other';
+  // Email of the admin who entered a manual order
+  createdBy?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -78,6 +84,11 @@ const OrderSchema = new Schema<IOrder>(
       required: true,
       min: 0
     },
+    discount: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
     deliveryFee: {
       type: Number,
       required: true,
@@ -102,6 +113,14 @@ const OrderSchema = new Schema<IOrder>(
     notes: {
       type: String,
       trim: true
+    },
+    source: {
+      type: String,
+      enum: ['website', 'facebook', 'whatsapp', 'phone', 'other'],
+      default: 'website'
+    },
+    createdBy: {
+      type: String
     }
   },
   {
