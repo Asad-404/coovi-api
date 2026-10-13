@@ -26,8 +26,8 @@ GitHub Actions (`.github/workflows/ci.yml`) runs the typecheck and the tests on 
 - `src/config/` owns the MongoDB connection; `src/models/` owns Mongoose schemas; `src/routes/` owns products, orders, and auth endpoints; `src/middleware/` owns JWT admin authorization.
 - Protected admin routes require a JWT Bearer token. Public checkout is guest-only.
 - The server loads product prices and stock from MongoDB and computes order items, subtotal, delivery fee, and total. Clients should send only product IDs and quantities.
-- Order status is forward-only (`NEXT_STATUSES` in `src/routes/orders.ts`): Pending → Processing | Cancelled, Processing → Shipped | Cancelled, Shipped → Delivered; Delivered and Cancelled are final. Other transitions return 409.
-- Stock changes on status transitions: `Pending → Processing` decrements stock, and `Processing → Cancelled` restores it. The transition is claimed with a conditional update on the old status so concurrent requests can't double-apply stock.
+- Order status is forward-only (`NEXT_STATUSES` in `src/routes/orders.ts`): Pending → Processing | Cancelled, Processing → Shipped | Cancelled, Shipped → Delivered | Returned (parcel refused at the door); Delivered, Cancelled and Returned are final (no returns after delivery). Other transitions return 409.
+- Stock changes on status transitions: `Pending → Processing` decrements stock, and `Processing → Cancelled` and `Shipped → Returned` restore it (`Returned` only when `restock` is not false). Pre-order lines never take or return stock. The transition is claimed with a conditional update on the old status so concurrent requests can't double-apply stock.
 - Tests use mongodb-memory-server; where its binary download is blocked, point `MONGOMS_SYSTEM_BINARY` at a local `mongod`.
 - Public read and order-lookup limits (`src/middleware/rateLimiters.ts`) key on the visitor IP. The storefront server sends `STOREFRONT_API_KEY` in `x-coovi-storefront-key`; with it, `x-coovi-client-ip` is trusted as the shopper's IP, and without a shopper IP it gets its own larger bucket.
 - Register `/orders/delivery-fee` before `/orders/:orderNumber`; route ordering is significant.

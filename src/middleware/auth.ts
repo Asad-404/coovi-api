@@ -37,3 +37,10 @@ export const requireAdmin = (req: Request, res: Response, next: NextFunction): v
     });
   }
 };
+
+// Who did it: stamped on order notes and history entries. Only call it on
+// routes behind requireAdmin, where req.admin is always set.
+export const actor = (req: Request): { by: string; byId: string } => ({
+  by: req.admin!.email,
+  byId: req.admin!.id
+});
