@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
 import Product from './models/Product';
+import { checkSeedAllowed } from './seedGuard';
 
 const sampleProducts = [
   {
@@ -78,7 +79,19 @@ const sampleProducts = [
 const seed = async (): Promise<void> => {
   try {
     await mongoose.connect(process.env.MONGODB_URI || '', { appName: 'coovi-api' });
-    console.log('✅ Connected to MongoDB');
+    console.log(`✅ Connected to MongoDB (database: ${mongoose.connection.name})`);
+
+    const guard = checkSeedAllowed({
+      nodeEnv: process.env.NODE_ENV,
+      dbName: mongoose.connection.name,
+      existingProducts: await Product.countDocuments(),
+      argv: process.argv.slice(2),
+    });
+    if (!guard.allowed) {
+      console.error(`🛑 Seed refused: ${guard.reason}`);
+      await mongoose.disconnect();
+      process.exit(1);
+    }
 
     await Product.deleteMany({});
     console.log('🗑️  Cleared existing products');

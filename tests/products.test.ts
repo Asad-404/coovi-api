@@ -199,6 +199,60 @@ describe('sale pricing (compareAtPrice)', () => {
     expect(res.body.data.size).toBeUndefined();
   });
 
+  it('keeps the sale and pre-order settings when an update leaves them out', async () => {
+    const token = await getAdminToken();
+    const product = await Product.create({
+      ...VALID_PRODUCT,
+      slug: 'keep-settings-saree',
+      category: 'Jamdani',
+      inStock: false,
+      allowPreorder: true,
+      preorderDays: 20,
+    });
+    const { category, inStock, ...withoutSettings } = VALID_PRODUCT;
+    void category;
+    void inStock;
+    const res = await request(app)
+      .put(`/api/products/${product._id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...withoutSettings, slug: 'keep-settings-saree', name: 'Renamed Saree' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe('Renamed Saree');
+    expect(res.body.data.category).toBe('Jamdani');
+    expect(res.body.data.inStock).toBe(false);
+    expect(res.body.data.allowPreorder).toBe(true);
+    expect(res.body.data.preorderDays).toBe(20);
+  });
+
+  it('still changes the settings when an update sends them', async () => {
+    const token = await getAdminToken();
+    const product = await Product.create({ ...VALID_PRODUCT, slug: 'change-settings-saree', allowPreorder: true });
+    const res = await request(app)
+      .put(`/api/products/${product._id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_PRODUCT, slug: 'change-settings-saree', inStock: false, allowPreorder: false, preorderDays: 30 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.inStock).toBe(false);
+    expect(res.body.data.allowPreorder).toBe(false);
+    expect(res.body.data.preorderDays).toBe(30);
+  });
+
+  it('still gives a new product the default settings', async () => {
+    const token = await getAdminToken();
+    const { category, inStock, ...withoutSettings } = VALID_PRODUCT;
+    void category;
+    void inStock;
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...withoutSettings, slug: 'default-settings-saree' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.category).toBe('Saree');
+    expect(res.body.data.inStock).toBe(true);
+    expect(res.body.data.allowPreorder).toBe(false);
+    expect(res.body.data.preorderDays).toBe(15);
+  });
+
   it('still charges the current price in orders, not the original price', async () => {
     const product = await Product.create({ ...VALID_PRODUCT, slug: 'order-sale-saree', price: 1200, compareAtPrice: 1800 });
     const res = await request(app)
