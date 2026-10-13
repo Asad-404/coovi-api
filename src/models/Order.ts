@@ -8,6 +8,9 @@ export interface IOrderItem {
   quantity: number;
   image: string;
   size?: string;
+  // true when this line is made or sourced to order: no stock is taken or returned for it
+  preorder?: boolean;
+  preorderDays?: number;
 }
 
 export interface IOrder extends Document {
@@ -66,7 +69,9 @@ const OrderSchema = new Schema<IOrder>(
       price: { type: Number, required: true },
       quantity: { type: Number, required: true, min: 1 },
       image: { type: String, required: true },
-      size: { type: String }
+      size: { type: String },
+      preorder: { type: Boolean, default: false },
+      preorderDays: { type: Number, min: 1 }
     }],
     subtotal: {
       type: Number,
@@ -109,5 +114,7 @@ OrderSchema.index({ phone: 1 });
 OrderSchema.index({ status: 1 });
 OrderSchema.index({ deliveryArea: 1 });
 OrderSchema.index({ createdAt: -1 });
+// "Changed since" lookups from the admin (GET /orders?updatedSince=)
+OrderSchema.index({ updatedAt: 1 });
 
 export default mongoose.model<IOrder>('Order', OrderSchema);

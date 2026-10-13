@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
@@ -12,18 +13,36 @@ import {
   getDeliveryFees,
   resolveDeliveryArea
 } from '../services/deliveryFees';
+import { notifyNewOrder } from '../services/notify';
 
 const router = Router();
 
-// Generate order number
-const generateOrderNumber = (): string => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `ORD-${year}${month}${day}-${random}`;
+// Order number + phone are a guest's only credentials for viewing an order, so
+// the random part must be unguessable: 6 characters from a 30-letter alphabet
+// (no look-alikes 0/O, 1/I/L, and no U) is ~729 million per day, drawn with a
+// cryptographic RNG. The date is the shop's day in Bangladesh (UTC+6), not UTC.
+const ORDER_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
+const ORDER_CODE_LENGTH = 6;
+
+export const generateOrderNumber = (now: Date = new Date()): string => {
+  const date = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dhaka',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  })
+    .format(now)
+    .replace(/-/g, '');
+  let code = '';
+  for (let i = 0; i < ORDER_CODE_LENGTH; i++) {
+    code += ORDER_CODE_ALPHABET[randomInt(ORDER_CODE_ALPHABET.length)];
+  }
+  return `ORD-${date}-${code}`;
 };
+
+// Guest phone, same rule as checkout. Shared with the lookup so the query can
+// only ever be one plain phone string.
+const phoneSchema = z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01');
 
 // The order body deliberately accepts ONLY quantities (CC-1: never trust the
 // browser). NOT a strictObject on purpose: a client that still sends prices or
@@ -31,7 +50,7 @@ const generateOrderNumber = (): string => {
 // them, so a spoofed "total: 1" can't be stored no matter what the client sends.
 const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
-  phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01'),
+  phone: phoneSchema,
   address: z.string().min(5).max(500),
   // Optional so an older storefront that sends neither still works (inside Dhaka)
   district: z.enum(DISTRICTS).optional(),
@@ -72,7 +91,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   // Load the REAL products from the DB — source of truth for price, name, image
   const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size');
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays');
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
   for (const item of items) {
@@ -95,7 +114,8 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
       return;
     }
 
-    if (product.stock < item.quantity) {
+    // Not enough stock: a pre-order product takes the whole line as a pre-order instead
+    if (product.stock < item.quantity && !product.allowPreorder) {
       res.status(400).json({
         success: false,
         message: `Only ${product.stock} left of "${product.name}" — you asked for ${item.quantity}`
@@ -107,13 +127,16 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   // Recompute EVERYTHING server-side (CC-1); the fee comes from the area (CC-3)
   const orderItems = items.map((item) => {
     const product = productMap.get(item.productId)!;
+    const preorder = product.stock < item.quantity;
     return {
       productId: item.productId,
       name: product.name,
       price: product.price,
       quantity: item.quantity,
       image: product.images[0],
-      size: product.size
+      size: product.size,
+      preorder,
+      ...(preorder && { preorderDays: product.preorderDays })
     };
   });
 
@@ -121,7 +144,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   const deliveryFee = await getDeliveryFee(deliveryArea);
   const total = subtotal + deliveryFee;
 
-  // The unique orderNumber index can reject a random collision (1-in-1000/day) —
+  // The unique orderNumber index can (very rarely) reject a random collision —
   // generating a fresh number and retrying is friendlier than erroring
   let order = null;
   for (let attempt = 0; attempt < 3 && !order; attempt++) {
@@ -159,6 +182,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     data: order,
     message: 'Order placed successfully'
   });
+
+  // Alert the owner after the customer has their answer; notifyNewOrder never throws
+  void notifyNewOrder(order);
 });
 
 type OrderStatus = IOrder['status'];
@@ -174,10 +200,28 @@ const orderListQuerySchema = z.object({
   deliveryArea: z.enum(DELIVERY_AREAS).optional().catch(undefined)
 });
 
+// ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
+// so the admin can keep its list fresh without downloading every order each minute.
+// Unlike the lenient fields above, a bad time is a 400: silently ignoring it would
+// return the whole list and hide the client's bug.
+const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status, deliveryArea } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
+  // Taken before the query: the client asks "changed since serverTime" next time, so a
+  // change landing while this request runs is picked up then instead of being missed
+  const serverTime = new Date().toISOString();
+
+  const since = updatedSinceSchema.safeParse(req.query.updatedSince);
+  if (!since.success) {
+    res.status(400).json({
+      success: false,
+      message: 'updatedSince must be an ISO date-time, e.g. 2026-10-13T07:45:00.000Z'
+    });
+    return;
+  }
 
   const query: QueryFilter<IOrder> = {};
   if (status) {
@@ -187,10 +231,13 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
     // Orders from before delivery areas have no field and were charged the inside-Dhaka fee
     query.deliveryArea = deliveryArea === 'inside_dhaka' ? { $in: ['inside_dhaka', null] } : deliveryArea;
   }
+  if (since.data) {
+    query.updatedAt = { $gte: new Date(since.data) };
+  }
 
-  // Execute query
+  // Execute query (changes come oldest first so paging through them is stable)
   const orders = await Order.find(query)
-    .sort({ createdAt: -1 })
+    .sort(since.data ? { updatedAt: 1, _id: 1 } : { createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .select('-__v');
@@ -200,6 +247,7 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   res.json({
     success: true,
     data: orders,
+    serverTime,
     pagination: {
       page,
       limit,
@@ -230,9 +278,8 @@ router.get('/delivery-fee', readLimiter, async (_req: Request, res: Response): P
 // so nobody can probe which order numbers exist.)
 router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Response): Promise<void> => {
   const { orderNumber } = req.params;
-  const phone = req.query.phone as string | undefined;
 
-  if (!phone) {
+  if (req.query.phone === undefined) {
     res.status(400).json({
       success: false,
       message: 'Phone number is required to view an order'
@@ -240,7 +287,19 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone }).select('-__v');
+  // Exactly one well-formed phone. Repeated ?phone=a&phone=b arrives as an
+  // array, which Mongoose would turn into "phone is a OR b" and let one request
+  // try many phones; ?phone[$ne]=x arrives as an object. Both are refused here.
+  const phone = phoneSchema.safeParse(req.query.phone);
+  if (!phone.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Send one phone number: 11 digits starting with 01'
+    });
+    return;
+  }
+
+  const order = await Order.findOne({ orderNumber, phone: phone.data }).select('-__v');
 
   if (!order) {
     res.status(404).json({
@@ -275,7 +334,7 @@ export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
 const orderDetailsSchema = z
   .strictObject({
     customerName: z.string().trim().min(1).max(100).optional(),
-    phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01').optional(),
+    phone: phoneSchema.optional(),
     address: z.string().trim().min(5).max(500).optional(),
     notes: z.string().trim().max(500).optional(),
     district: z.enum(DISTRICTS).optional(),
@@ -426,16 +485,29 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
   // atomic operation that both checks and writes: the filter matches only
   // when enough stock exists, so two admins confirming overlapping orders
   // can never drive stock below zero (a plain $inc could).
+  // Pre-order lines take no stock. A line whose stock ran out since the order
+  // was placed (someone else bought the last piece) becomes a pre-order when
+  // the product allows it, instead of blocking the confirmation.
   if (oldStatus === 'Pending' && status === 'Processing') {
     const taken: { productId: string; quantity: number }[] = [];
+    const becamePreorder: { index: number; preorderDays: number }[] = [];
 
-    for (const item of order.items) {
+    for (const [index, item] of order.items.entries()) {
+      if (item.preorder) continue;
+
       const result = await Product.updateOne(
         { _id: item.productId, stock: { $gte: item.quantity } },
         { $inc: { stock: -item.quantity } }
       );
 
       if (result.matchedCount === 0) {
+        const product = await Product.findById(item.productId).select('name stock allowPreorder preorderDays');
+
+        if (product?.allowPreorder) {
+          becamePreorder.push({ index, preorderDays: product.preorderDays });
+          continue;
+        }
+
         // This item couldn't be taken — give back any stock taken earlier in
         // the loop and release the claim so the order is left completely untouched
         for (const t of taken) {
@@ -443,7 +515,6 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
         }
         await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
 
-        const product = await Product.findById(item.productId).select('name stock');
         res.status(409).json({
           success: false,
           message: `Insufficient stock for "${product?.name ?? item.name}": only ${product?.stock ?? 0} left, order needs ${item.quantity}`
@@ -453,11 +524,23 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
 
       taken.push({ productId: String(item.productId), quantity: item.quantity });
     }
+
+    if (becamePreorder.length) {
+      const changes: Record<string, boolean | number> = {};
+      for (const { index, preorderDays } of becamePreorder) {
+        changes[`items.${index}.preorder`] = true;
+        changes[`items.${index}.preorderDays`] = preorderDays;
+        order.items[index].preorder = true;
+        order.items[index].preorderDays = preorderDays;
+      }
+      await Order.updateOne({ _id: id }, { $set: changes });
+    }
   }
 
-  // Cancelling a confirmed order puts its stock back
+  // Cancelling a confirmed order puts its stock back (pre-order lines took none)
   if (oldStatus === 'Processing' && status === 'Cancelled') {
     for (const item of order.items) {
+      if (item.preorder) continue;
       await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
     }
   }

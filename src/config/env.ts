@@ -42,5 +42,15 @@ export function checkEnv(env: NodeJS.ProcessEnv = process.env): EnvCheck {
     warnings.push('CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET are not all set; admin photo upload will be unavailable');
   }
 
+  if (!env.STOREFRONT_API_KEY) {
+    warnings.push('STOREFRONT_API_KEY is not set, so the storefront server shares one rate limit with every shopper; set the same random value on the API and the storefront');
+  } else if (env.STOREFRONT_API_KEY.length < 32) {
+    problems.push('STOREFRONT_API_KEY should be at least 32 characters (generate one the same way as JWT_SECRET)');
+  }
+
+  if (!env.EMAIL_API_KEY || !env.NOTIFY_EMAIL_TO) {
+    warnings.push('EMAIL_API_KEY and NOTIFY_EMAIL_TO are not both set; new orders will not be emailed to you');
+  }
+
   return { errors, warnings };
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import request from 'supertest';
 import app from '../src/app';
+import { generateOrderNumber } from '../src/routes/orders';
 import Product from '../src/models/Product';
 import Order from '../src/models/Order';
 
@@ -218,6 +219,23 @@ describe('GET /api/orders/:orderNumber (phone-match lookup — CC-2)', () => {
     expect(nonexistent.status).toBe(404);
     expect(wrongPhone.body).toEqual(nonexistent.body);
   });
+
+  it('refuses a LIST of phones — one request cannot try many phones', async () => {
+    const res = await request(app).get(
+      `/api/orders/${orderNumber}?phone=01999999999&phone=${validOrderBody().phone}`
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.data).toBeUndefined();
+  });
+
+  it('refuses an operator object or malformed phone', async () => {
+    const operator = await request(app).get(`/api/orders/${orderNumber}?phone[$ne]=x`);
+    const malformed = await request(app).get(`/api/orders/${orderNumber}`).query({ phone: '017' });
+
+    expect(operator.status).toBe(400);
+    expect(malformed.status).toBe(400);
+  });
 });
 
 describe('GET /api/orders (admin list query validation)', () => {
@@ -252,5 +270,22 @@ describe('GET /api/orders (admin list query validation)', () => {
     expect(pending.body.data).toHaveLength(1);
     const shipped = await adminGet('?status=Shipped');
     expect(shipped.body.data).toHaveLength(0);
+  });
+});
+
+describe('generateOrderNumber', () => {
+  it('uses 6 unambiguous random characters', () => {
+    const numbers = new Set(Array.from({ length: 200 }, () => generateOrderNumber()));
+
+    expect(numbers.size).toBe(200);
+    for (const n of numbers) {
+      expect(n).toMatch(/^ORD-\d{8}-[2-9A-HJKMNP-TV-Z]{6}$/);
+    }
+  });
+
+  it("dates the order by the shop's day in Bangladesh, not UTC", () => {
+    // 20:30 UTC on 12 Oct is 02:30 on 13 Oct in Dhaka
+    expect(generateOrderNumber(new Date('2026-10-12T20:30:00Z'))).toMatch(/^ORD-20261013-/);
+    expect(generateOrderNumber(new Date('2026-10-12T17:59:00Z'))).toMatch(/^ORD-20261012-/);
   });
 });
