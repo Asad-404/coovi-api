@@ -4,6 +4,7 @@ import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
+import { notifyNewOrder } from '../services/notify';
 
 const router = Router();
 
@@ -150,6 +151,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     data: order,
     message: 'Order placed successfully'
   });
+
+  // Alert the owner after the customer has their answer; notifyNewOrder never throws
+  void notifyNewOrder(order);
 });
 
 type OrderStatus = IOrder['status'];
