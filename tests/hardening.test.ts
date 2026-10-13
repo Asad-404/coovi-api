@@ -15,6 +15,8 @@ const GOOD_PROD_ENV = {
   CLOUDINARY_API_SECRET: 'test-cloudinary-secret',
   EMAIL_API_KEY: 're_test_key',
   NOTIFY_EMAIL_TO: 'owner@example.com',
+  SMS_PROVIDER: 'alpha',
+  SMS_API_KEY: 'test-sms-key',
 } as NodeJS.ProcessEnv;
 
 describe('checkEnv', () => {
@@ -53,6 +55,15 @@ describe('checkEnv', () => {
     const result = checkEnv({ ...GOOD_PROD_ENV, CLOUDINARY_API_SECRET: '' } as NodeJS.ProcessEnv);
     expect(result.errors).toEqual([]);
     expect(result.warnings.join(' ')).toMatch(/CLOUDINARY/);
+  });
+
+  it('warns, without failing production, when customer SMS is off or the provider is unknown', () => {
+    const off = checkEnv({ ...GOOD_PROD_ENV, SMS_API_KEY: '' } as NodeJS.ProcessEnv);
+    expect(off.errors).toEqual([]);
+    expect(off.warnings.join(' ')).toMatch(/SMS_PROVIDER and SMS_API_KEY/);
+
+    const unknown = checkEnv({ ...GOOD_PROD_ENV, SMS_PROVIDER: 'twilio' } as NodeJS.ProcessEnv);
+    expect(unknown.warnings.join(' ')).toMatch(/not supported/);
   });
 });
 

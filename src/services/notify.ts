@@ -1,4 +1,5 @@
 import type { IOrder } from '../models/Order';
+import { sendOrderConfirmationSms } from './sms';
 
 // New-order alerts by email through Resend's HTTP API (https://resend.com/docs/api-reference/emails/send-email).
 // An HTTP API rather than SMTP because many hosts, Render's free plan among them, block outgoing SMTP ports.
@@ -81,4 +82,10 @@ export async function notifyNewOrder(order: AlertOrder, env: NodeJS.ProcessEnv =
   } catch (error) {
     console.error(`New-order email for ${order.orderNumber} failed:`, error);
   }
+}
+
+// The one place orders.ts calls after a new order is saved: the owner's email alert and the
+// customer's confirmation SMS. Both never throw, so neither can block the other or the order.
+export async function notifyOrderPlaced(order: AlertOrder, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  await Promise.all([notifyNewOrder(order, env), sendOrderConfirmationSms(order, env)]);
 }
