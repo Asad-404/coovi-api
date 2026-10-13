@@ -13,6 +13,8 @@ const GOOD_PROD_ENV = {
   CLOUDINARY_CLOUD_NAME: 'demo-cloud',
   CLOUDINARY_API_KEY: '123456789012345',
   CLOUDINARY_API_SECRET: 'test-cloudinary-secret',
+  EMAIL_API_KEY: 're_test_key',
+  NOTIFY_EMAIL_TO: 'owner@example.com',
 } as NodeJS.ProcessEnv;
 
 describe('checkEnv', () => {
