@@ -4,6 +4,7 @@ import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
+import { notifyNewOrder } from '../services/notify';
 
 const router = Router();
 
@@ -61,7 +62,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   // Load the REAL products from the DB — source of truth for price, name, image
   const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size');
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays');
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
   for (const item of items) {
@@ -84,7 +85,8 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
       return;
     }
 
-    if (product.stock < item.quantity) {
+    // Not enough stock: a pre-order product takes the whole line as a pre-order instead
+    if (product.stock < item.quantity && !product.allowPreorder) {
       res.status(400).json({
         success: false,
         message: `Only ${product.stock} left of "${product.name}" — you asked for ${item.quantity}`
@@ -96,13 +98,16 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
   const orderItems = items.map((item) => {
     const product = productMap.get(item.productId)!;
+    const preorder = product.stock < item.quantity;
     return {
       productId: item.productId,
       name: product.name,
       price: product.price,
       quantity: item.quantity,
       image: product.images[0],
-      size: product.size
+      size: product.size,
+      preorder,
+      ...(preorder && { preorderDays: product.preorderDays })
     };
   });
 
@@ -146,6 +151,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     data: order,
     message: 'Order placed successfully'
   });
+
+  // Alert the owner after the customer has their answer; notifyNewOrder never throws
+  void notifyNewOrder(order);
 });
 
 type OrderStatus = IOrder['status'];
@@ -160,19 +168,40 @@ const orderListQuerySchema = z.object({
   status: z.enum(ORDER_STATUSES).optional().catch(undefined)
 });
 
+// ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
+// so the admin can keep its list fresh without downloading every order each minute.
+// Unlike the lenient fields above, a bad time is a 400: silently ignoring it would
+// return the whole list and hide the client's bug.
+const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
+  // Taken before the query: the client asks "changed since serverTime" next time, so a
+  // change landing while this request runs is picked up then instead of being missed
+  const serverTime = new Date().toISOString();
 
-  const query: { status?: OrderStatus } = {};
+  const since = updatedSinceSchema.safeParse(req.query.updatedSince);
+  if (!since.success) {
+    res.status(400).json({
+      success: false,
+      message: 'updatedSince must be an ISO date-time, e.g. 2026-10-13T07:45:00.000Z'
+    });
+    return;
+  }
+
+  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
   if (status) {
     query.status = status;
   }
+  if (since.data) {
+    query.updatedAt = { $gte: new Date(since.data) };
+  }
 
-  // Execute query
+  // Execute query (changes come oldest first so paging through them is stable)
   const orders = await Order.find(query)
-    .sort({ createdAt: -1 })
+    .sort(since.data ? { updatedAt: 1, _id: 1 } : { createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .select('-__v');
@@ -182,6 +211,7 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   res.json({
     success: true,
     data: orders,
+    serverTime,
     pagination: {
       page,
       limit,
@@ -362,16 +392,29 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
   // atomic operation that both checks and writes: the filter matches only
   // when enough stock exists, so two admins confirming overlapping orders
   // can never drive stock below zero (a plain $inc could).
+  // Pre-order lines take no stock. A line whose stock ran out since the order
+  // was placed (someone else bought the last piece) becomes a pre-order when
+  // the product allows it, instead of blocking the confirmation.
   if (oldStatus === 'Pending' && status === 'Processing') {
     const taken: { productId: string; quantity: number }[] = [];
+    const becamePreorder: { index: number; preorderDays: number }[] = [];
 
-    for (const item of order.items) {
+    for (const [index, item] of order.items.entries()) {
+      if (item.preorder) continue;
+
       const result = await Product.updateOne(
         { _id: item.productId, stock: { $gte: item.quantity } },
         { $inc: { stock: -item.quantity } }
       );
 
       if (result.matchedCount === 0) {
+        const product = await Product.findById(item.productId).select('name stock allowPreorder preorderDays');
+
+        if (product?.allowPreorder) {
+          becamePreorder.push({ index, preorderDays: product.preorderDays });
+          continue;
+        }
+
         // This item couldn't be taken — give back any stock taken earlier in
         // the loop and release the claim so the order is left completely untouched
         for (const t of taken) {
@@ -379,7 +422,6 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
         }
         await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
 
-        const product = await Product.findById(item.productId).select('name stock');
         res.status(409).json({
           success: false,
           message: `Insufficient stock for "${product?.name ?? item.name}": only ${product?.stock ?? 0} left, order needs ${item.quantity}`
@@ -389,11 +431,23 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
 
       taken.push({ productId: String(item.productId), quantity: item.quantity });
     }
+
+    if (becamePreorder.length) {
+      const changes: Record<string, boolean | number> = {};
+      for (const { index, preorderDays } of becamePreorder) {
+        changes[`items.${index}.preorder`] = true;
+        changes[`items.${index}.preorderDays`] = preorderDays;
+        order.items[index].preorder = true;
+        order.items[index].preorderDays = preorderDays;
+      }
+      await Order.updateOne({ _id: id }, { $set: changes });
+    }
   }
 
-  // Cancelling a confirmed order puts its stock back
+  // Cancelling a confirmed order puts its stock back (pre-order lines took none)
   if (oldStatus === 'Processing' && status === 'Cancelled') {
     for (const item of order.items) {
+      if (item.preorder) continue;
       await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
     }
   }
