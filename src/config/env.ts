@@ -40,5 +40,9 @@ export function checkEnv(env: NodeJS.ProcessEnv = process.env): EnvCheck {
     warnings.push('CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET are not all set; admin photo upload will be unavailable');
   }
 
+  if (!env.STEADFAST_API_KEY || !env.STEADFAST_SECRET_KEY) {
+    warnings.push('STEADFAST_API_KEY and STEADFAST_SECRET_KEY are not both set; booking parcels with Steadfast will be unavailable');
+  }
+
   return { errors, warnings };
 }

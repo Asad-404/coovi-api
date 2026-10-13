@@ -12,6 +12,19 @@ export interface IOrderItem {
   preorderDays?: number;
 }
 
+// The parcel booked with the courier. Filled by the Steadfast booking route;
+// bookingStartedAt is a short lock so two clicks can't book the same order twice.
+export interface IOrderCourier {
+  name?: 'Steadfast';
+  consignmentId?: number;
+  trackingCode?: string;
+  // The courier's own delivery status, e.g. in_review, pending, hold, delivered, cancelled
+  status?: string;
+  bookedAt?: Date;
+  statusCheckedAt?: Date;
+  bookingStartedAt?: Date;
+}
+
 export interface IOrder extends Document {
   orderNumber: string;
   customerName: string;
@@ -24,6 +37,7 @@ export interface IOrder extends Document {
   status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled';
   paymentMethod: string;
   notes?: string;
+  courier?: IOrderCourier;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -89,6 +103,21 @@ const OrderSchema = new Schema<IOrder>(
     notes: {
       type: String,
       trim: true
+    },
+    courier: {
+      type: new Schema<IOrderCourier>(
+        {
+          name: { type: String, enum: ['Steadfast'] },
+          consignmentId: { type: Number },
+          trackingCode: { type: String },
+          status: { type: String },
+          bookedAt: { type: Date },
+          statusCheckedAt: { type: Date },
+          bookingStartedAt: { type: Date }
+        },
+        { _id: false }
+      ),
+      default: undefined
     }
   },
   {

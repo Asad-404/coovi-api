@@ -13,6 +13,8 @@ const GOOD_PROD_ENV = {
   CLOUDINARY_CLOUD_NAME: 'demo-cloud',
   CLOUDINARY_API_KEY: '123456789012345',
   CLOUDINARY_API_SECRET: 'test-cloudinary-secret',
+  STEADFAST_API_KEY: 'test-steadfast-key',
+  STEADFAST_SECRET_KEY: 'test-steadfast-secret',
 } as NodeJS.ProcessEnv;
 
 describe('checkEnv', () => {
@@ -51,6 +53,12 @@ describe('checkEnv', () => {
     const result = checkEnv({ ...GOOD_PROD_ENV, CLOUDINARY_API_SECRET: '' } as NodeJS.ProcessEnv);
     expect(result.errors).toEqual([]);
     expect(result.warnings.join(' ')).toMatch(/CLOUDINARY/);
+  });
+
+  it('warns, without failing production, when the Steadfast keys are missing', () => {
+    const result = checkEnv({ ...GOOD_PROD_ENV, STEADFAST_SECRET_KEY: '' } as NodeJS.ProcessEnv);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join(' ')).toMatch(/STEADFAST/);
   });
 });
 
