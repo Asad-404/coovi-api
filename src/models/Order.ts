@@ -51,9 +51,14 @@ export interface IOrder extends Document {
   discount: number;
   deliveryFee: number;
   total: number;
-  status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled';
+  status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled' | 'Returned';
   paymentMethod: string;
   notes?: string;
+  // Why the order was cancelled or the parcel came back (set on Cancelled and Returned)
+  cancelReason?: string;
+  returnedAt?: Date;
+  // Whether stock was put back when the parcel came back
+  restocked?: boolean;
   // Where the order came from: the website checkout, or entered by an admin
   source: 'website' | 'facebook' | 'whatsapp' | 'phone' | 'other';
   // Email of the admin who entered a manual order
@@ -66,7 +71,7 @@ export interface IOrder extends Document {
   updatedAt: Date;
 }
 
-const ORDER_STATUS_VALUES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
+const ORDER_STATUS_VALUES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Returned'];
 
 const OrderSchema = new Schema<IOrder>(
   {
@@ -132,7 +137,7 @@ const OrderSchema = new Schema<IOrder>(
     },
     status: {
       type: String,
-      enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'],
+      enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Returned'],
       default: 'Pending'
     },
     paymentMethod: {
@@ -144,6 +149,9 @@ const OrderSchema = new Schema<IOrder>(
       type: String,
       trim: true
     },
+    cancelReason: { type: String, trim: true, maxlength: 300 },
+    returnedAt: { type: Date },
+    restocked: { type: Boolean },
     source: {
       type: String,
       enum: ['website', 'facebook', 'whatsapp', 'phone', 'other'],
