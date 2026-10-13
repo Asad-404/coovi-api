@@ -23,7 +23,7 @@ const listQuerySchema = z.object({
 
 // Request bodies are validated STRICTLY: anything unexpected is rejected
 // (this is what stops clients from setting fields they shouldn't — mass assignment)
-const productBodySchema = z.strictObject({
+const productFields = {
   slug: z
     .string()
     .min(1)
@@ -39,16 +39,43 @@ const productBodySchema = z.strictObject({
   compareAtPrice: z.number().int().min(0).nullable().optional(),
   images: z.array(z.url()).min(1),
   size: z.string().max(50).optional(),
-  category: z.string().min(1).max(50).default('Saree'),
+  category: z.string().min(1).max(50),
   stock: z.number().int().min(0),
-  inStock: z.boolean().default(true),
-}).refine((p) => p.compareAtPrice == null || p.compareAtPrice > p.price, {
+  inStock: z.boolean(),
+  // Out of stock pre-orders: allowed only when this is on; preorderDays is the promised wait
+  allowPreorder: z.boolean(),
+  preorderDays: z.number().int().min(1).max(90),
+};
+
+const compareAtPriceRule = {
   path: ['compareAtPrice'],
   message: 'must be greater than price (it is the original price before the discount)',
-});
+};
+const compareAtPriceIsValid = (p: { price: number; compareAtPrice?: number | null }) =>
+  p.compareAtPrice == null || p.compareAtPrice > p.price;
 
-// Optional fields a full PUT replaces: leaving one out (or a null compareAtPrice) clears it,
-// so the admin form can empty a field instead of the old value silently staying
+// Create: settings left out get their defaults
+const productCreateSchema = z.strictObject({
+  ...productFields,
+  category: productFields.category.default('Saree'),
+  inStock: productFields.inStock.default(true),
+  allowPreorder: productFields.allowPreorder.default(false),
+  preorderDays: productFields.preorderDays.default(15),
+}).refine(compareAtPriceIsValid, compareAtPriceRule);
+
+// Update: settings left out KEEP their saved value. A default here would silently put a
+// product switched off for sale back on sale, or stop a product taking pre-orders
+const productUpdateSchema = z.strictObject({
+  ...productFields,
+  category: productFields.category.optional(),
+  inStock: productFields.inStock.optional(),
+  allowPreorder: productFields.allowPreorder.optional(),
+  preorderDays: productFields.preorderDays.optional(),
+}).refine(compareAtPriceIsValid, compareAtPriceRule);
+
+// Optional text fields a PUT replaces: leaving one out (or a null compareAtPrice) clears it,
+// so the admin form can empty a field instead of the old value silently staying.
+// (The settings category, inStock, allowPreorder and preorderDays are kept instead.)
 const OPTIONAL_FIELDS = ['nameBn', 'description', 'descriptionBn', 'size', 'compareAtPrice'] as const;
 
 // A null compareAtPrice means "remove the discount": strip it before saving
@@ -148,7 +175,7 @@ router.get('/:slug', readLimiter, async (req: Request, res: Response): Promise<v
 
 // POST /api/products - Create new product (Admin only - JWT required)
 router.post('/', requireAdmin, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  const parsed = productBodySchema.safeParse(req.body);
+  const parsed = productCreateSchema.safeParse(req.body);
 
   if (!parsed.success) {
     res.status(400).json({
@@ -184,7 +211,7 @@ router.post('/', requireAdmin, async (req: Request, res: Response, next: NextFun
 router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
 
-  const parsed = productBodySchema.safeParse(req.body);
+  const parsed = productUpdateSchema.safeParse(req.body);
 
   if (!parsed.success) {
     res.status(400).json({
