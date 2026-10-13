@@ -61,7 +61,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   // Load the REAL products from the DB — source of truth for price, name, image
   const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size');
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays');
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
   for (const item of items) {
@@ -84,7 +84,8 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
       return;
     }
 
-    if (product.stock < item.quantity) {
+    // Not enough stock: a pre-order product takes the whole line as a pre-order instead
+    if (product.stock < item.quantity && !product.allowPreorder) {
       res.status(400).json({
         success: false,
         message: `Only ${product.stock} left of "${product.name}" — you asked for ${item.quantity}`
@@ -96,13 +97,16 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
   const orderItems = items.map((item) => {
     const product = productMap.get(item.productId)!;
+    const preorder = product.stock < item.quantity;
     return {
       productId: item.productId,
       name: product.name,
       price: product.price,
       quantity: item.quantity,
       image: product.images[0],
-      size: product.size
+      size: product.size,
+      preorder,
+      ...(preorder && { preorderDays: product.preorderDays })
     };
   });
 
@@ -362,16 +366,29 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
   // atomic operation that both checks and writes: the filter matches only
   // when enough stock exists, so two admins confirming overlapping orders
   // can never drive stock below zero (a plain $inc could).
+  // Pre-order lines take no stock. A line whose stock ran out since the order
+  // was placed (someone else bought the last piece) becomes a pre-order when
+  // the product allows it, instead of blocking the confirmation.
   if (oldStatus === 'Pending' && status === 'Processing') {
     const taken: { productId: string; quantity: number }[] = [];
+    const becamePreorder: { index: number; preorderDays: number }[] = [];
 
-    for (const item of order.items) {
+    for (const [index, item] of order.items.entries()) {
+      if (item.preorder) continue;
+
       const result = await Product.updateOne(
         { _id: item.productId, stock: { $gte: item.quantity } },
         { $inc: { stock: -item.quantity } }
       );
 
       if (result.matchedCount === 0) {
+        const product = await Product.findById(item.productId).select('name stock allowPreorder preorderDays');
+
+        if (product?.allowPreorder) {
+          becamePreorder.push({ index, preorderDays: product.preorderDays });
+          continue;
+        }
+
         // This item couldn't be taken — give back any stock taken earlier in
         // the loop and release the claim so the order is left completely untouched
         for (const t of taken) {
@@ -379,7 +396,6 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
         }
         await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
 
-        const product = await Product.findById(item.productId).select('name stock');
         res.status(409).json({
           success: false,
           message: `Insufficient stock for "${product?.name ?? item.name}": only ${product?.stock ?? 0} left, order needs ${item.quantity}`
@@ -389,11 +405,23 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
 
       taken.push({ productId: String(item.productId), quantity: item.quantity });
     }
+
+    if (becamePreorder.length) {
+      const changes: Record<string, boolean | number> = {};
+      for (const { index, preorderDays } of becamePreorder) {
+        changes[`items.${index}.preorder`] = true;
+        changes[`items.${index}.preorderDays`] = preorderDays;
+        order.items[index].preorder = true;
+        order.items[index].preorderDays = preorderDays;
+      }
+      await Order.updateOne({ _id: id }, { $set: changes });
+    }
   }
 
-  // Cancelling a confirmed order puts its stock back
+  // Cancelling a confirmed order puts its stock back (pre-order lines took none)
   if (oldStatus === 'Processing' && status === 'Cancelled') {
     for (const item of order.items) {
+      if (item.preorder) continue;
       await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
     }
   }

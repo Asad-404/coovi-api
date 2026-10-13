@@ -13,6 +13,8 @@ export interface IProduct extends Document {
   category: string;
   stock: number;
   inStock: boolean;
+  allowPreorder: boolean;
+  preorderDays: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -74,6 +76,18 @@ const ProductSchema = new Schema<IProduct>(
     inStock: {
       type: Boolean,
       default: true
+    },
+    // When stock runs out, a pre-order product can still be ordered: the saree is sourced for
+    // that customer and ships in about preorderDays. Pre-ordered pieces never touch `stock`.
+    allowPreorder: {
+      type: Boolean,
+      default: false
+    },
+    preorderDays: {
+      type: Number,
+      default: 15,
+      min: 1,
+      max: 90
     },
   },
   {
