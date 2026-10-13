@@ -168,19 +168,40 @@ const orderListQuerySchema = z.object({
   status: z.enum(ORDER_STATUSES).optional().catch(undefined)
 });
 
+// ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
+// so the admin can keep its list fresh without downloading every order each minute.
+// Unlike the lenient fields above, a bad time is a 400: silently ignoring it would
+// return the whole list and hide the client's bug.
+const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
+  // Taken before the query: the client asks "changed since serverTime" next time, so a
+  // change landing while this request runs is picked up then instead of being missed
+  const serverTime = new Date().toISOString();
 
-  const query: { status?: OrderStatus } = {};
+  const since = updatedSinceSchema.safeParse(req.query.updatedSince);
+  if (!since.success) {
+    res.status(400).json({
+      success: false,
+      message: 'updatedSince must be an ISO date-time, e.g. 2026-10-13T07:45:00.000Z'
+    });
+    return;
+  }
+
+  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
   if (status) {
     query.status = status;
   }
+  if (since.data) {
+    query.updatedAt = { $gte: new Date(since.data) };
+  }
 
-  // Execute query
+  // Execute query (changes come oldest first so paging through them is stable)
   const orders = await Order.find(query)
-    .sort({ createdAt: -1 })
+    .sort(since.data ? { updatedAt: 1, _id: 1 } : { createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .select('-__v');
@@ -190,6 +211,7 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   res.json({
     success: true,
     data: orders,
+    serverTime,
     pagination: {
       page,
       limit,
