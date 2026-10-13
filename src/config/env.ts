@@ -40,5 +40,15 @@ export function checkEnv(env: NodeJS.ProcessEnv = process.env): EnvCheck {
     warnings.push('CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET are not all set; admin photo upload will be unavailable');
   }
 
+  if (!env.EMAIL_API_KEY || !env.NOTIFY_EMAIL_TO) {
+    warnings.push('EMAIL_API_KEY and NOTIFY_EMAIL_TO are not both set; new orders will not be emailed to you');
+  }
+
+  if (!env.SMS_PROVIDER || !env.SMS_API_KEY) {
+    warnings.push('SMS_PROVIDER and SMS_API_KEY are not both set; customers will not get an order SMS');
+  } else if (env.SMS_PROVIDER.trim().toLowerCase() !== 'alpha') {
+    warnings.push(`SMS_PROVIDER "${env.SMS_PROVIDER}" is not supported (use "alpha"); customers will not get an order SMS`);
+  }
+
   return { errors, warnings };
 }
