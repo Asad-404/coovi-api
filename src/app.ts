@@ -8,6 +8,7 @@ import productRoutes from './routes/products';
 import orderRoutes from './routes/orders';
 import uploadRoutes from './routes/uploads';
 import courierPaymentRoutes from './routes/courierPayments';
+import settingsRoutes from './routes/settings';
 import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
@@ -45,7 +46,8 @@ app.get('/', (_req: Request, res: Response) => {
       orders: '/api/orders',
       auth: '/api/auth',
       uploads: '/api/uploads',
-      courierPayments: '/api/courier-payments'
+      courierPayments: '/api/courier-payments',
+      settings: '/api/settings'
     }
   });
 });
@@ -66,6 +68,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/courier-payments', courierPaymentRoutes);
+app.use('/api/settings', settingsRoutes);
 
 // 404 handler
 app.use((_req: Request, res: Response) => {

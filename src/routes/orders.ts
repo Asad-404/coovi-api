@@ -4,18 +4,17 @@ import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
+import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
+import { notifyNewOrder } from '../services/notify';
+
+// Re-exported so tests keep importing it from the route
+export { generateOrderNumber } from '../services/orderPricing';
 
 const router = Router();
 
-// Generate order number
-const generateOrderNumber = (): string => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `ORD-${year}${month}${day}-${random}`;
-};
+// Guest phone, same rule as checkout. Shared with the lookup so the query can
+// only ever be one plain phone string.
+const phoneSchema = z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01');
 
 // Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
 // decides what it pays. Read at call time so tests and deploys can change it.
@@ -30,7 +29,7 @@ const getDeliveryFee = (): number => {
 // them, so a spoofed "total: 1" can't be stored no matter what the client sends.
 const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
-  phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01'),
+  phone: phoneSchema,
   address: z.string().min(5).max(500),
   notes: z.string().max(500).optional(),
   items: z
@@ -59,83 +58,30 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   const { customerName, phone, address, notes, items } = parsed.data;
 
-  // Load the REAL products from the DB — source of truth for price, name, image
-  const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays');
-  const productMap = new Map(products.map((p) => [String(p._id), p]));
+  // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
+  const built = await buildOrderItems(items);
 
-  for (const item of items) {
-    const product = productMap.get(item.productId);
-
-    if (!product) {
-      res.status(400).json({
-        success: false,
-        message: `Item is no longer available (product ${item.productId})`
-      });
-      return;
-    }
-
-    // The admin's "Available for sale" switch (inStock) takes a product off sale even while units remain
-    if (!product.inStock) {
-      res.status(400).json({
-        success: false,
-        message: `"${product.name}" is currently unavailable`
-      });
-      return;
-    }
-
-    // Not enough stock: a pre-order product takes the whole line as a pre-order instead
-    if (product.stock < item.quantity && !product.allowPreorder) {
-      res.status(400).json({
-        success: false,
-        message: `Only ${product.stock} left of "${product.name}" — you asked for ${item.quantity}`
-      });
-      return;
-    }
+  if (!built.ok) {
+    res.status(400).json({ success: false, message: built.message });
+    return;
   }
 
-  // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
-  const orderItems = items.map((item) => {
-    const product = productMap.get(item.productId)!;
-    const preorder = product.stock < item.quantity;
-    return {
-      productId: item.productId,
-      name: product.name,
-      price: product.price,
-      quantity: item.quantity,
-      image: product.images[0],
-      size: product.size,
-      preorder,
-      ...(preorder && { preorderDays: product.preorderDays })
-    };
-  });
-
-  const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const { items: orderItems, subtotal } = built;
   const deliveryFee = getDeliveryFee();
   const total = subtotal + deliveryFee;
 
-  // The unique orderNumber index can reject a random collision (1-in-1000/day) —
-  // generating a fresh number and retrying is friendlier than erroring
-  let order = null;
-  for (let attempt = 0; attempt < 3 && !order; attempt++) {
-    try {
-      order = await Order.create({
-        orderNumber: generateOrderNumber(),
-        customerName,
-        phone,
-        address,
-        notes,
-        items: orderItems,
-        subtotal,
-        deliveryFee,
-        total,
-        paymentMethod: 'Cash on Delivery',
-        status: 'Pending'
-      });
-    } catch (error: any) {
-      if (error.code !== 11000) throw error;
-    }
-  }
+  const order = await createOrderWithNumber({
+    customerName,
+    phone,
+    address,
+    notes,
+    items: orderItems,
+    subtotal,
+    deliveryFee,
+    total,
+    paymentMethod: 'Cash on Delivery',
+    status: 'Pending'
+  });
 
   if (!order) {
     res.status(500).json({
@@ -149,6 +95,95 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     success: true,
     data: order,
     message: 'Order placed successfully'
+  });
+
+  // Alert the owner after the customer has their answer; notifyNewOrder never throws
+  void notifyNewOrder(order);
+});
+
+export const ORDER_SOURCES = ['facebook', 'whatsapp', 'phone', 'other'] as const;
+
+// An order an admin types in for a customer who ordered by Facebook, WhatsApp
+// or phone. Same items-and-quantities body as checkout, so prices still come
+// from the database; the admin may also agree a delivery fee and a taka
+// discount with the customer. strictObject: a client sending price or total
+// fields gets a 400 instead of believing it set them.
+const manualOrderSchema = z.strictObject({
+  ...orderBodySchema.shape,
+  source: z.enum(ORDER_SOURCES),
+  deliveryFeeOverride: z.number().int().min(0).max(10000).optional(),
+  discount: z.number().int().min(0).optional()
+});
+
+// POST /api/orders/manual - Enter an order taken outside the website (Admin only - JWT required)
+// Not rate-limited like checkout: the admin is trusted and may enter many orders in a row.
+router.post('/manual', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+  const parsed = manualOrderSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Invalid order data',
+      errors: parsed.error.issues.map((issue) =>
+        issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message
+      )
+    });
+    return;
+  }
+
+  const { customerName, phone, address, notes, items, source, deliveryFeeOverride, discount = 0 } = parsed.data;
+
+  const built = await buildOrderItems(items);
+
+  if (!built.ok) {
+    res.status(400).json({ success: false, message: built.message });
+    return;
+  }
+
+  const { items: orderItems, subtotal } = built;
+
+  // The discount comes off the sarees, never the delivery fee, so the total can't go below the fee
+  if (discount > subtotal) {
+    res.status(400).json({
+      success: false,
+      message: `Discount (${discount}) can't be more than the items subtotal (${subtotal})`
+    });
+    return;
+  }
+
+  const deliveryFee = deliveryFeeOverride ?? getDeliveryFee();
+  const total = subtotal - discount + deliveryFee;
+
+  // Created as Pending like a website order: confirming it (Pending → Processing)
+  // takes the stock through the same path as every other order
+  const order = await createOrderWithNumber({
+    customerName,
+    phone,
+    address,
+    notes,
+    items: orderItems,
+    subtotal,
+    discount,
+    deliveryFee,
+    total,
+    paymentMethod: 'Cash on Delivery',
+    status: 'Pending',
+    source,
+    createdBy: req.admin?.email
+  });
+
+  if (!order) {
+    res.status(500).json({
+      success: false,
+      message: 'Could not generate a unique order number, please try again'
+    });
+    return;
+  }
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    message: 'Order added successfully'
   });
 });
 
@@ -164,19 +199,40 @@ const orderListQuerySchema = z.object({
   status: z.enum(ORDER_STATUSES).optional().catch(undefined)
 });
 
+// ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
+// so the admin can keep its list fresh without downloading every order each minute.
+// Unlike the lenient fields above, a bad time is a 400: silently ignoring it would
+// return the whole list and hide the client's bug.
+const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
+  // Taken before the query: the client asks "changed since serverTime" next time, so a
+  // change landing while this request runs is picked up then instead of being missed
+  const serverTime = new Date().toISOString();
 
-  const query: { status?: OrderStatus } = {};
+  const since = updatedSinceSchema.safeParse(req.query.updatedSince);
+  if (!since.success) {
+    res.status(400).json({
+      success: false,
+      message: 'updatedSince must be an ISO date-time, e.g. 2026-10-13T07:45:00.000Z'
+    });
+    return;
+  }
+
+  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
   if (status) {
     query.status = status;
   }
+  if (since.data) {
+    query.updatedAt = { $gte: new Date(since.data) };
+  }
 
-  // Execute query
+  // Execute query (changes come oldest first so paging through them is stable)
   const orders = await Order.find(query)
-    .sort({ createdAt: -1 })
+    .sort(since.data ? { updatedAt: 1, _id: 1 } : { createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .select('-__v');
@@ -186,6 +242,7 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   res.json({
     success: true,
     data: orders,
+    serverTime,
     pagination: {
       page,
       limit,
@@ -213,9 +270,8 @@ router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void =>
 // so nobody can probe which order numbers exist.)
 router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Response): Promise<void> => {
   const { orderNumber } = req.params;
-  const phone = req.query.phone as string | undefined;
 
-  if (!phone) {
+  if (req.query.phone === undefined) {
     res.status(400).json({
       success: false,
       message: 'Phone number is required to view an order'
@@ -223,7 +279,19 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone }).select('-__v');
+  // Exactly one well-formed phone. Repeated ?phone=a&phone=b arrives as an
+  // array, which Mongoose would turn into "phone is a OR b" and let one request
+  // try many phones; ?phone[$ne]=x arrives as an object. Both are refused here.
+  const phone = phoneSchema.safeParse(req.query.phone);
+  if (!phone.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Send one phone number: 11 digits starting with 01'
+    });
+    return;
+  }
+
+  const order = await Order.findOne({ orderNumber, phone: phone.data }).select('-__v');
 
   if (!order) {
     res.status(404).json({
@@ -258,7 +326,7 @@ export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
 const orderDetailsSchema = z
   .strictObject({
     customerName: z.string().trim().min(1).max(100).optional(),
-    phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01').optional(),
+    phone: phoneSchema.optional(),
     address: z.string().trim().min(5).max(500).optional(),
     notes: z.string().trim().max(500).optional()
   })
