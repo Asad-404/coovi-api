@@ -1,9 +1,17 @@
 import { Router, Request, Response } from 'express';
+import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
 import { requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
+import {
+  DELIVERY_AREAS,
+  DISTRICTS,
+  getDeliveryFee,
+  getDeliveryFees,
+  resolveDeliveryArea
+} from '../services/deliveryFees';
 
 const router = Router();
 
@@ -17,13 +25,6 @@ const generateOrderNumber = (): string => {
   return `ORD-${year}${month}${day}-${random}`;
 };
 
-// Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
-// decides what it pays. Read at call time so tests and deploys can change it.
-const getDeliveryFee = (): number => {
-  const fee = Number(process.env.DELIVERY_FEE);
-  return Number.isFinite(fee) && fee >= 0 ? fee : 60;
-};
-
 // The order body deliberately accepts ONLY quantities (CC-1: never trust the
 // browser). NOT a strictObject on purpose: a client that still sends prices or
 // totals gets them silently DROPPED, not rejected — the API simply never reads
@@ -32,6 +33,9 @@ const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
   phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01'),
   address: z.string().min(5).max(500),
+  // Optional so an older storefront that sends neither still works (inside Dhaka)
+  district: z.enum(DISTRICTS).optional(),
+  deliveryArea: z.enum(DELIVERY_AREAS).optional(),
   notes: z.string().max(500).optional(),
   items: z
     .array(
@@ -57,7 +61,14 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     return;
   }
 
-  const { customerName, phone, address, notes, items } = parsed.data;
+  const { customerName, phone, address, district, notes, items } = parsed.data;
+
+  const resolved = resolveDeliveryArea(district, parsed.data.deliveryArea);
+  if ('error' in resolved) {
+    res.status(400).json({ success: false, message: 'Invalid order data', errors: [`deliveryArea: ${resolved.error}`] });
+    return;
+  }
+  const deliveryArea = resolved.area;
 
   // Load the REAL products from the DB — source of truth for price, name, image
   const productIds = items.map((item) => item.productId);
@@ -93,7 +104,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     }
   }
 
-  // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
+  // Recompute EVERYTHING server-side (CC-1); the fee comes from the area (CC-3)
   const orderItems = items.map((item) => {
     const product = productMap.get(item.productId)!;
     return {
@@ -107,7 +118,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   });
 
   const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const deliveryFee = getDeliveryFee();
+  const deliveryFee = await getDeliveryFee(deliveryArea);
   const total = subtotal + deliveryFee;
 
   // The unique orderNumber index can reject a random collision (1-in-1000/day) —
@@ -120,6 +131,8 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
         customerName,
         phone,
         address,
+        district,
+        deliveryArea,
         notes,
         items: orderItems,
         subtotal,
@@ -157,17 +170,22 @@ const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancel
 const orderListQuerySchema = z.object({
   page: z.coerce.number().int().catch(1).transform((v) => Math.max(1, v)),
   limit: z.coerce.number().int().catch(20).transform((v) => Math.min(Math.max(1, v), 100)),
-  status: z.enum(ORDER_STATUSES).optional().catch(undefined)
+  status: z.enum(ORDER_STATUSES).optional().catch(undefined),
+  deliveryArea: z.enum(DELIVERY_AREAS).optional().catch(undefined)
 });
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const { page, limit, status } = orderListQuerySchema.parse(req.query);
+  const { page, limit, status, deliveryArea } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
 
-  const query: { status?: OrderStatus } = {};
+  const query: QueryFilter<IOrder> = {};
   if (status) {
     query.status = status;
+  }
+  if (deliveryArea) {
+    // Orders from before delivery areas have no field and were charged the inside-Dhaka fee
+    query.deliveryArea = deliveryArea === 'inside_dhaka' ? { $in: ['inside_dhaka', null] } : deliveryArea;
   }
 
   // Execute query
@@ -192,14 +210,17 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
 });
 
 // GET /api/orders/delivery-fee - The checkout page needs to SHOW the fee
-// before the customer places the order — this is the same server-side value
+// before the customer places the order — these are the same server-side values
 // that will be charged, so the number can never disagree with the API.
+// `deliveryFee` (inside Dhaka) stays for older clients; `zones` has every area
+// and `districts` is the list checkout offers.
 // Must be registered BEFORE GET /:orderNumber, or "delivery-fee" would be
 // captured as an orderNumber.
-router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void => {
+router.get('/delivery-fee', readLimiter, async (_req: Request, res: Response): Promise<void> => {
+  const zones = await getDeliveryFees();
   res.json({
     success: true,
-    data: { deliveryFee: getDeliveryFee() }
+    data: { deliveryFee: zones.inside_dhaka, zones, districts: DISTRICTS }
   });
 });
 
@@ -256,7 +277,9 @@ const orderDetailsSchema = z
     customerName: z.string().trim().min(1).max(100).optional(),
     phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01').optional(),
     address: z.string().trim().min(5).max(500).optional(),
-    notes: z.string().trim().max(500).optional()
+    notes: z.string().trim().max(500).optional(),
+    district: z.enum(DISTRICTS).optional(),
+    deliveryArea: z.enum(DELIVERY_AREAS).optional()
   })
   .refine((body) => Object.keys(body).length > 0, 'Send at least one field to update');
 
@@ -278,9 +301,46 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     return;
   }
 
+  const { district, deliveryArea, ...contact } = parsed.data;
+  const update: Record<string, unknown> = { ...contact };
+  // Changing where the parcel goes can change the fee, so it is only allowed
+  // before the order is confirmed; the API recomputes the fee and total.
+  const changesDelivery = district !== undefined || deliveryArea !== undefined;
+  let allowedStatuses: { $nin: OrderStatus[] } | OrderStatus = { $nin: FINAL_STATUSES };
+
+  if (changesDelivery) {
+    const current = await Order.findById(req.params.id).select('status district deliveryArea subtotal deliveryFee');
+    if (!current) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+    if (current.status !== 'Pending') {
+      res.status(409).json({ success: false, message: 'The delivery area can only be changed while the order is Pending' });
+      return;
+    }
+
+    const newDistrict = district ?? current.district;
+    // A new non-Dhaka district decides the area on its own; otherwise keep the current one
+    const requestedArea = deliveryArea ?? (district !== undefined ? undefined : current.deliveryArea);
+    const resolved = resolveDeliveryArea(newDistrict, requestedArea);
+    if ('error' in resolved) {
+      res.status(400).json({ success: false, message: 'Invalid order details', errors: [`deliveryArea: ${resolved.error}`] });
+      return;
+    }
+
+    update.district = newDistrict;
+    update.deliveryArea = resolved.area;
+    // Same area: the fee charged at checkout stands, even if the fee setting moved since
+    if (resolved.area !== (current.deliveryArea ?? 'inside_dhaka')) {
+      update.deliveryFee = await getDeliveryFee(resolved.area);
+      update.total = current.subtotal + (update.deliveryFee as number);
+    }
+    allowedStatuses = 'Pending';
+  }
+
   const order = await Order.findOneAndUpdate(
-    { _id: req.params.id, status: { $nin: FINAL_STATUSES } },
-    { $set: parsed.data },
+    { _id: req.params.id, status: allowedStatuses },
+    { $set: update },
     { returnDocument: 'after', runValidators: true }
   ).select('-__v');
 
@@ -288,7 +348,11 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     const exists = await Order.exists({ _id: req.params.id });
     res.status(exists ? 409 : 404).json({
       success: false,
-      message: exists ? 'Delivered or cancelled orders can no longer be edited' : 'Order not found'
+      message: !exists
+        ? 'Order not found'
+        : changesDelivery
+          ? 'The delivery area can only be changed while the order is Pending'
+          : 'Delivered or cancelled orders can no longer be edited'
     });
     return;
   }
