@@ -1,9 +1,18 @@
 import { Router, Request, Response } from 'express';
+import { Types } from 'mongoose';
+import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { actor, requireAdmin } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
+import {
+  DELIVERY_AREAS,
+  DISTRICTS,
+  getDeliveryFee,
+  getDeliveryFees,
+  resolveDeliveryArea
+} from '../services/deliveryFees';
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
 import { notifyNewOrder } from '../services/notify';
 
@@ -12,16 +21,21 @@ export { generateOrderNumber } from '../services/orderPricing';
 
 const router = Router();
 
+// Admin-only fields. Every response a customer can see (placing an order,
+// public tracking) leaves these out; the admin routes return everything.
+export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked'] as const;
+const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`)].join(' ');
+
+const toPublicOrder = (order: IOrder) => {
+  const data: Record<string, unknown> = order.toObject();
+  delete data.__v;
+  for (const field of PRIVATE_ORDER_FIELDS) delete data[field];
+  return data;
+};
+
 // Guest phone, same rule as checkout. Shared with the lookup so the query can
 // only ever be one plain phone string.
 const phoneSchema = z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01');
-
-// Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
-// decides what it pays. Read at call time so tests and deploys can change it.
-const getDeliveryFee = (): number => {
-  const fee = Number(process.env.DELIVERY_FEE);
-  return Number.isFinite(fee) && fee >= 0 ? fee : 60;
-};
 
 // The order body deliberately accepts ONLY quantities (CC-1: never trust the
 // browser). NOT a strictObject on purpose: a client that still sends prices or
@@ -31,6 +45,9 @@ const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
   phone: phoneSchema,
   address: z.string().min(5).max(500),
+  // Optional so an older storefront that sends neither still works (inside Dhaka)
+  district: z.enum(DISTRICTS).optional(),
+  deliveryArea: z.enum(DELIVERY_AREAS).optional(),
   notes: z.string().max(500).optional(),
   items: z
     .array(
@@ -56,9 +73,16 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     return;
   }
 
-  const { customerName, phone, address, notes, items } = parsed.data;
+  const { customerName, phone, address, district, notes, items } = parsed.data;
 
-  // Recompute EVERYTHING server-side (CC-1) with the delivery fee from env (CC-3)
+  const resolved = resolveDeliveryArea(district, parsed.data.deliveryArea);
+  if ('error' in resolved) {
+    res.status(400).json({ success: false, message: 'Invalid order data', errors: [`deliveryArea: ${resolved.error}`] });
+    return;
+  }
+  const deliveryArea = resolved.area;
+
+  // Recompute EVERYTHING server-side (CC-1); the fee comes from the area (CC-3)
   const built = await buildOrderItems(items);
 
   if (!built.ok) {
@@ -67,20 +91,23 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   }
 
   const { items: orderItems, subtotal } = built;
-  const deliveryFee = getDeliveryFee();
+  const deliveryFee = await getDeliveryFee(deliveryArea);
   const total = subtotal + deliveryFee;
 
   const order = await createOrderWithNumber({
     customerName,
     phone,
     address,
+    district,
+    deliveryArea,
     notes,
     items: orderItems,
     subtotal,
     deliveryFee,
     total,
     paymentMethod: 'Cash on Delivery',
-    status: 'Pending'
+    status: 'Pending',
+    statusHistory: [{ to: 'Pending', by: 'customer', at: new Date() }]
   });
 
   if (!order) {
@@ -93,7 +120,7 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
 
   res.status(201).json({
     success: true,
-    data: order,
+    data: toPublicOrder(order),
     message: 'Order placed successfully'
   });
 
@@ -131,7 +158,14 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     return;
   }
 
-  const { customerName, phone, address, notes, items, source, deliveryFeeOverride, discount = 0 } = parsed.data;
+  const { customerName, phone, address, district, notes, items, source, deliveryFeeOverride, discount = 0 } = parsed.data;
+
+  const resolved = resolveDeliveryArea(district, parsed.data.deliveryArea);
+  if ('error' in resolved) {
+    res.status(400).json({ success: false, message: 'Invalid order data', errors: [`deliveryArea: ${resolved.error}`] });
+    return;
+  }
+  const deliveryArea = resolved.area;
 
   const built = await buildOrderItems(items);
 
@@ -151,7 +185,7 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     return;
   }
 
-  const deliveryFee = deliveryFeeOverride ?? getDeliveryFee();
+  const deliveryFee = deliveryFeeOverride ?? (await getDeliveryFee(deliveryArea));
   const total = subtotal - discount + deliveryFee;
 
   // Created as Pending like a website order: confirming it (Pending → Processing)
@@ -160,6 +194,8 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     customerName,
     phone,
     address,
+    district,
+    deliveryArea,
     notes,
     items: orderItems,
     subtotal,
@@ -169,7 +205,8 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
     paymentMethod: 'Cash on Delivery',
     status: 'Pending',
     source,
-    createdBy: req.admin?.email
+    createdBy: req.admin?.email,
+    statusHistory: [{ to: 'Pending', ...actor(req), at: new Date() }]
   });
 
   if (!order) {
@@ -189,14 +226,15 @@ router.post('/manual', requireAdmin, async (req: Request, res: Response): Promis
 
 type OrderStatus = IOrder['status'];
 
-const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'] as const;
+const ORDER_STATUSES = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Returned'] as const;
 
 // Same lenient query handling as GET /api/products: bad values fall back to
 // defaults instead of erroring (a negative page used to reach Mongo as a negative skip)
 const orderListQuerySchema = z.object({
   page: z.coerce.number().int().catch(1).transform((v) => Math.max(1, v)),
   limit: z.coerce.number().int().catch(20).transform((v) => Math.min(Math.max(1, v), 100)),
-  status: z.enum(ORDER_STATUSES).optional().catch(undefined)
+  status: z.enum(ORDER_STATUSES).optional().catch(undefined),
+  deliveryArea: z.enum(DELIVERY_AREAS).optional().catch(undefined)
 });
 
 // ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
@@ -207,7 +245,7 @@ const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const { page, limit, status } = orderListQuerySchema.parse(req.query);
+  const { page, limit, status, deliveryArea } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
   // Taken before the query: the client asks "changed since serverTime" next time, so a
   // change landing while this request runs is picked up then instead of being missed
@@ -222,9 +260,13 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
     return;
   }
 
-  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
+  const query: QueryFilter<IOrder> = {};
   if (status) {
     query.status = status;
+  }
+  if (deliveryArea) {
+    // Orders from before delivery areas have no field and were charged the inside-Dhaka fee
+    query.deliveryArea = deliveryArea === 'inside_dhaka' ? { $in: ['inside_dhaka', null] } : deliveryArea;
   }
   if (since.data) {
     query.updatedAt = { $gte: new Date(since.data) };
@@ -253,14 +295,17 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
 });
 
 // GET /api/orders/delivery-fee - The checkout page needs to SHOW the fee
-// before the customer places the order — this is the same server-side value
+// before the customer places the order — these are the same server-side values
 // that will be charged, so the number can never disagree with the API.
+// `deliveryFee` (inside Dhaka) stays for older clients; `zones` has every area
+// and `districts` is the list checkout offers.
 // Must be registered BEFORE GET /:orderNumber, or "delivery-fee" would be
 // captured as an orderNumber.
-router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void => {
+router.get('/delivery-fee', readLimiter, async (_req: Request, res: Response): Promise<void> => {
+  const zones = await getDeliveryFees();
   res.json({
     success: true,
-    data: { deliveryFee: getDeliveryFee() }
+    data: { deliveryFee: zones.inside_dhaka, zones, districts: DISTRICTS }
   });
 });
 
@@ -291,7 +336,7 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone: phone.data }).select('-__v');
+  const order = await Order.findOne({ orderNumber, phone: phone.data }).select(PUBLIC_ORDER_SELECT);
 
   if (!order) {
     res.status(404).json({
@@ -308,15 +353,18 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
 });
 
 // Orders only move forward. Stock is taken on Pending → Processing and given
-// back on Processing → Cancelled; every other jump (back to Pending, cancelling
-// after shipping, reopening a delivered order) would take or return stock twice
-// or not at all, so it is refused.
+// back on Processing → Cancelled or on Shipped → Returned (the customer refused
+// the parcel at the door). Every other jump (back to Pending, cancelling after
+// shipping, reopening a delivered order) would take or return stock twice or
+// not at all, so it is refused. Customers check the saree in front of the rider,
+// so the shop does not take returns after delivery: Delivered is final.
 export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
   Pending: ['Processing', 'Cancelled'],
   Processing: ['Shipped', 'Cancelled'],
-  Shipped: ['Delivered'],
+  Shipped: ['Delivered', 'Returned'],
   Delivered: [],
-  Cancelled: []
+  Cancelled: [],
+  Returned: []
 };
 
 // Admin can correct contact/delivery details after a customer calls. Items,
@@ -328,12 +376,14 @@ const orderDetailsSchema = z
     customerName: z.string().trim().min(1).max(100).optional(),
     phone: phoneSchema.optional(),
     address: z.string().trim().min(5).max(500).optional(),
-    notes: z.string().trim().max(500).optional()
+    notes: z.string().trim().max(500).optional(),
+    district: z.enum(DISTRICTS).optional(),
+    deliveryArea: z.enum(DELIVERY_AREAS).optional()
   })
   .refine((body) => Object.keys(body).length > 0, 'Send at least one field to update');
 
-// Delivered and Cancelled orders are history — their details are frozen
-const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled'];
+// Delivered, Cancelled and Returned orders are history — their details are frozen
+const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled', 'Returned'];
 
 // PATCH /api/orders/:id - Edit customer/delivery details (Admin only - JWT required)
 router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
@@ -350,17 +400,75 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
     return;
   }
 
+  const { district, deliveryArea, ...contact } = parsed.data;
+  const update: Record<string, unknown> = { ...contact };
+  // Changing where the parcel goes can change the fee, so it is only allowed
+  // before the order is confirmed; the API recomputes the fee and total.
+  const changesDelivery = district !== undefined || deliveryArea !== undefined;
+
+  const current = await Order.findById(req.params.id)
+    .select('status customerName phone address notes district deliveryArea subtotal discount deliveryFee total')
+    .lean();
+  if (!current) {
+    res.status(404).json({ success: false, message: 'Order not found' });
+    return;
+  }
+  if (changesDelivery && current.status !== 'Pending') {
+    res.status(409).json({ success: false, message: 'The delivery area can only be changed while the order is Pending' });
+    return;
+  }
+  if (FINAL_STATUSES.includes(current.status)) {
+    res.status(409).json({ success: false, message: 'Delivered, cancelled or returned orders can no longer be edited' });
+    return;
+  }
+
+  if (changesDelivery) {
+    const newDistrict = district ?? current.district;
+    // A new non-Dhaka district decides the area on its own; otherwise keep the current one
+    const requestedArea = deliveryArea ?? (district !== undefined ? undefined : current.deliveryArea);
+    const resolved = resolveDeliveryArea(newDistrict, requestedArea);
+    if ('error' in resolved) {
+      res.status(400).json({ success: false, message: 'Invalid order details', errors: [`deliveryArea: ${resolved.error}`] });
+      return;
+    }
+
+    update.district = newDistrict;
+    update.deliveryArea = resolved.area;
+    // Same area: the fee charged at checkout stands, even if the fee setting moved since
+    if (resolved.area !== (current.deliveryArea ?? 'inside_dhaka')) {
+      update.deliveryFee = await getDeliveryFee(resolved.area);
+      // A manual order's agreed discount stays; an agreed delivery fee is replaced by the area's fee
+      update.total = current.subtotal - (current.discount ?? 0) + (update.deliveryFee as number);
+    }
+  }
+
+  // Keep a before/after record of every field that really changes,
+  // including a delivery fee and total the API recomputed
+  const before = current as unknown as Record<string, unknown>;
+  const text = (value: unknown) => (value === undefined || value === null ? undefined : String(value));
+  const changes = Object.keys(update)
+    .filter((field) => (text(before[field]) ?? '') !== (text(update[field]) ?? ''))
+    .map((field) => ({ field, from: text(before[field]), to: text(update[field]) }));
+
+  // The filter also matches the status and the values just read, so a change
+  // made by someone else in between gets a 409 instead of a wrong "from" value
   const order = await Order.findOneAndUpdate(
-    { _id: req.params.id, status: { $nin: FINAL_STATUSES } },
-    { $set: parsed.data },
+    {
+      _id: req.params.id,
+      status: current.status,
+      ...Object.fromEntries(changes.map((c) => [c.field, before[c.field] ?? { $exists: false }]))
+    },
+    {
+      $set: update,
+      ...(changes.length && { $push: { editHistory: { changes, ...actor(req), at: new Date() } } })
+    },
     { returnDocument: 'after', runValidators: true }
   ).select('-__v');
 
   if (!order) {
-    const exists = await Order.exists({ _id: req.params.id });
-    res.status(exists ? 409 : 404).json({
+    res.status(409).json({
       success: false,
-      message: exists ? 'Delivered or cancelled orders can no longer be edited' : 'Order not found'
+      message: 'This order was just changed by someone else — reload and try again'
     });
     return;
   }
@@ -372,7 +480,28 @@ router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<
   });
 });
 
-const statusBodySchema = z.object({ status: z.enum(ORDER_STATUSES) });
+// Returns an error message when the extra fields don't fit the transition
+function checkStatusExtras(status: OrderStatus, body: { reason?: string; restock?: boolean }): string | null {
+  if (status === 'Returned' && !body.reason) {
+    return 'Say why the parcel came back (reason is required for Returned)';
+  }
+  if (body.reason && status !== 'Cancelled' && status !== 'Returned') {
+    return 'A reason can only be given when cancelling or returning an order';
+  }
+  if (body.restock !== undefined && status !== 'Returned') {
+    return 'restock only applies to Returned';
+  }
+  return null;
+}
+
+// reason: why an order is cancelled or a parcel came back (required for Returned).
+// restock: whether a returned parcel goes back on sale (default yes; untick it
+// when the saree came back damaged).
+const statusBodySchema = z.object({
+  status: z.enum(ORDER_STATUSES),
+  reason: z.string().trim().min(1).max(300).optional(),
+  restock: z.boolean().optional()
+});
 
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
 router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
@@ -387,7 +516,7 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     return;
   }
 
-  const { status } = parsed.data;
+  const { status, reason, restock = true } = parsed.data;
   const current = await Order.findById(id).select('status');
 
   if (!current) {
@@ -413,12 +542,35 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     return;
   }
 
+  const extraError = checkStatusExtras(status, parsed.data);
+  if (extraError) {
+    res.status(400).json({
+      success: false,
+      message: extraError
+    });
+    return;
+  }
+
+  const changes: Record<string, unknown> = { status };
+  if (status === 'Cancelled' && reason) changes.cancelReason = reason;
+  if (status === 'Returned') {
+    changes.cancelReason = reason;
+    changes.returnedAt = new Date();
+    changes.restocked = restock;
+  }
+
   // Claim the transition atomically: the filter only matches while the order
   // is still in oldStatus, so two admins clicking at once can't both take (or
   // both return) the stock — the second one gets a 409.
+  // The history entry is written in the same update, so a status change and
+  // its record can never disagree.
+  const historyId = new Types.ObjectId();
   const order = await Order.findOneAndUpdate(
     { _id: id, status: oldStatus },
-    { $set: { status } },
+    {
+      $set: changes,
+      $push: { statusHistory: { _id: historyId, from: oldStatus, to: status, ...actor(req), at: new Date() } }
+    },
     { returnDocument: 'after' }
   ).select('-__v');
 
@@ -462,7 +614,10 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
         for (const t of taken) {
           await Product.updateOne({ _id: t.productId }, { $inc: { stock: t.quantity } });
         }
-        await Order.updateOne({ _id: id, status }, { $set: { status: oldStatus } });
+        await Order.updateOne(
+          { _id: id, status },
+          { $set: { status: oldStatus }, $pull: { statusHistory: { _id: historyId } } }
+        );
 
         res.status(409).json({
           success: false,
@@ -486,8 +641,13 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     }
   }
 
-  // Cancelling a confirmed order puts its stock back (pre-order lines took none)
-  if (oldStatus === 'Processing' && status === 'Cancelled') {
+  // Cancelling a confirmed order puts its stock back, and so does a refused
+  // parcel unless the admin said it can't be sold again. Every order that
+  // reaches Shipped went through Processing, so its stock was taken.
+  // Pre-order lines took none, so they give none back.
+  const returnsStock =
+    (oldStatus === 'Processing' && status === 'Cancelled') || (status === 'Returned' && restock);
+  if (returnsStock) {
     for (const item of order.items) {
       if (item.preorder) continue;
       await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
@@ -498,6 +658,42 @@ router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): P
     success: true,
     data: order,
     message: 'Order status updated successfully'
+  });
+});
+
+const noteBodySchema = z.object({ text: z.string().trim().min(1).max(500) });
+
+// POST /api/orders/:id/notes - Add a private note (Admin only - JWT required).
+// Allowed at any status: a call after delivery about a return still needs writing down.
+router.post('/:id/notes', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+  const parsed = noteBodySchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Note must be 1 to 500 characters'
+    });
+    return;
+  }
+
+  const order = await Order.findByIdAndUpdate(
+    req.params.id,
+    { $push: { internalNotes: { text: parsed.data.text, ...actor(req), at: new Date() } } },
+    { returnDocument: 'after' }
+  ).select('-__v');
+
+  if (!order) {
+    res.status(404).json({
+      success: false,
+      message: 'Order not found'
+    });
+    return;
+  }
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    message: 'Note added'
   });
 });
 
