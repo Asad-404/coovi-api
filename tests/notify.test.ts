@@ -39,6 +39,11 @@ describe('buildNewOrderEmail', () => {
     expect(email.html).not.toContain('<b>Akter</b>');
   });
 
+  it('adds the district to the address when the order has one', () => {
+    const email = buildNewOrderEmail({ ...ORDER, district: 'Sylhet' });
+    expect(email.text).toContain('Address: House 12, Road 5, Dhanmondi, Dhaka, Sylhet');
+  });
+
   it('leaves out the admin link when no address is set', () => {
     const email = buildNewOrderEmail({ ...ORDER, items: [ORDER.items[0]] });
 

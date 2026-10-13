@@ -49,6 +49,8 @@ function validOrderBody(): any {
 
 afterEach(() => {
   delete process.env.DELIVERY_FEE;
+  delete process.env.DELIVERY_FEE_INSIDE_DHAKA;
+  delete process.env.DELIVERY_FEE_OUTSIDE_DHAKA;
 });
 
 describe('POST /api/orders (server-computed totals — CC-1)', () => {
@@ -71,8 +73,8 @@ describe('POST /api/orders (server-computed totals — CC-1)', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.data.subtotal).toBe(2000); // 2 x DB price 1000
-    expect(res.body.data.deliveryFee).toBe(60); // server default
-    expect(res.body.data.total).toBe(2060);
+    expect(res.body.data.deliveryFee).toBe(70); // server default, inside Dhaka
+    expect(res.body.data.total).toBe(2070);
     expect(res.body.data.items[0].price).toBe(1000);
     expect(res.body.data.items[0].name).toBe('Red Test Saree');
     expect(res.body.data.items[0].image).toBe('https://picsum.photos/seed/red/800/1200');
@@ -91,7 +93,7 @@ describe('POST /api/orders (server-computed totals — CC-1)', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.data.subtotal).toBe(1000 + 3 * 250);
-    expect(res.body.data.total).toBe(1750 + 60);
+    expect(res.body.data.total).toBe(1750 + 70);
   });
 
   it('reads DELIVERY_FEE from the environment (CC-3)', async () => {
@@ -171,7 +173,7 @@ describe('GET /api/orders/delivery-fee (server-side fee for checkout display)', 
     // If the param route matched first, this would be a 404 "Order not found"
     // or a 400 demanding a phone
     expect(res.status).toBe(200);
-    expect(res.body.data.deliveryFee).toBe(60);
+    expect(res.body.data.deliveryFee).toBe(70);
   });
 });
 

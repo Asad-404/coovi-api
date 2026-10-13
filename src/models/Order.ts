@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { DELIVERY_AREAS, DISTRICTS, type DeliveryArea } from '../services/deliveryFees';
 
 export interface IOrderItem {
   productId: string;
@@ -17,6 +18,9 @@ export interface IOrder extends Document {
   customerName: string;
   phone: string;
   address: string;
+  // Missing on orders placed before delivery areas existed
+  district?: string;
+  deliveryArea: DeliveryArea;
   items: IOrderItem[];
   subtotal: number;
   // Taka off the items, agreed by an admin on a manual order (0 for website orders)
@@ -55,6 +59,15 @@ const OrderSchema = new Schema<IOrder>(
       type: String,
       required: true,
       trim: true
+    },
+    district: {
+      type: String,
+      enum: DISTRICTS
+    },
+    deliveryArea: {
+      type: String,
+      enum: DELIVERY_AREAS,
+      default: 'inside_dhaka'
     },
     items: [{
       productId: { type: String, required: true },
@@ -118,6 +131,7 @@ const OrderSchema = new Schema<IOrder>(
 // Index for order lookup
 OrderSchema.index({ phone: 1 });
 OrderSchema.index({ status: 1 });
+OrderSchema.index({ deliveryArea: 1 });
 OrderSchema.index({ createdAt: -1 });
 // "Changed since" lookups from the admin (GET /orders?updatedSince=)
 OrderSchema.index({ updatedAt: 1 });

@@ -14,7 +14,7 @@ const escapeHtml = (text: string): string =>
 
 type AlertOrder = Pick<
   IOrder,
-  'orderNumber' | 'customerName' | 'phone' | 'address' | 'items' | 'subtotal' | 'deliveryFee' | 'total' | 'notes'
+  'orderNumber' | 'customerName' | 'phone' | 'address' | 'district' | 'items' | 'subtotal' | 'deliveryFee' | 'total' | 'notes'
 >;
 
 export function buildNewOrderEmail(order: AlertOrder, adminUrl?: string): { subject: string; html: string; text: string } {
@@ -23,6 +23,7 @@ export function buildNewOrderEmail(order: AlertOrder, adminUrl?: string): { subj
     const wait = item.preorder ? ` (pre-order, about ${item.preorderDays ?? 15} days)` : '';
     return `${item.name}${wait} x ${item.quantity} = ৳${item.price * item.quantity}`;
   });
+  const address = order.district ? `${order.address}, ${order.district}` : order.address;
   const link = adminUrl ? `${adminUrl.replace(/\/+$/, '')}/orders` : undefined;
 
   const subject = `New order ${order.orderNumber}: ৳${order.total}${hasPreorder ? ' (includes pre-order)' : ''}`;
@@ -32,7 +33,7 @@ export function buildNewOrderEmail(order: AlertOrder, adminUrl?: string): { subj
     '',
     `Customer: ${order.customerName}`,
     `Phone: ${order.phone}`,
-    `Address: ${order.address}`,
+    `Address: ${address}`,
     ...(order.notes ? [`Notes: ${order.notes}`] : []),
     '',
     ...lines,
@@ -45,7 +46,7 @@ export function buildNewOrderEmail(order: AlertOrder, adminUrl?: string): { subj
   const html = `<h2>New order ${escapeHtml(order.orderNumber)}</h2>
 <p><strong>Customer:</strong> ${escapeHtml(order.customerName)}<br>
 <strong>Phone:</strong> <a href="tel:${escapeHtml(order.phone)}">${escapeHtml(order.phone)}</a><br>
-<strong>Address:</strong> ${escapeHtml(order.address)}${order.notes ? `<br><strong>Notes:</strong> ${escapeHtml(order.notes)}` : ''}</p>
+<strong>Address:</strong> ${escapeHtml(address)}${order.notes ? `<br><strong>Notes:</strong> ${escapeHtml(order.notes)}` : ''}</p>
 <ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
 <p>Subtotal: ৳${order.subtotal}<br>Delivery: ৳${order.deliveryFee}<br><strong>Total (cash on delivery): ৳${order.total}</strong></p>
 ${link ? `<p><a href="${escapeHtml(link)}">Open the admin</a></p>` : ''}`;
