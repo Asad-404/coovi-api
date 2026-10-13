@@ -14,7 +14,7 @@ pnpm test
 pnpm exec vitest run <test-file>
 ```
 
-`pnpm seed` replaces database product data with sample products; use it only when explicitly intended.
+`pnpm seed` replaces database product data with sample products; use it only when explicitly intended. It refuses to run when `NODE_ENV=production`, and on a database that already has products it needs the database name typed back: `pnpm seed --confirm=<database name>` (`src/seedGuard.ts`).
 
 Claude may run `pnpm test`, `pnpm build` and `pnpm exec tsc --noEmit` to check changes, and may push feature branches and open pull requests; never push `master`. Do not start `pnpm dev` or run `pnpm seed` unless asked.
 
