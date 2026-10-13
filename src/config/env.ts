@@ -46,5 +46,9 @@ export function checkEnv(env: NodeJS.ProcessEnv = process.env): EnvCheck {
     problems.push('STOREFRONT_API_KEY should be at least 32 characters (generate one the same way as JWT_SECRET)');
   }
 
+  if (!env.EMAIL_API_KEY || !env.NOTIFY_EMAIL_TO) {
+    warnings.push('EMAIL_API_KEY and NOTIFY_EMAIL_TO are not both set; new orders will not be emailed to you');
+  }
+
   return { errors, warnings };
 }
