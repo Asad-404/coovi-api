@@ -42,6 +42,9 @@ const productBodySchema = z.strictObject({
   category: z.string().min(1).max(50).default('Saree'),
   stock: z.number().int().min(0),
   inStock: z.boolean().default(true),
+  // Out of stock pre-orders: allowed only when this is on; preorderDays is the promised wait
+  allowPreorder: z.boolean().default(false),
+  preorderDays: z.number().int().min(1).max(90).default(15),
 }).refine((p) => p.compareAtPrice == null || p.compareAtPrice > p.price, {
   path: ['compareAtPrice'],
   message: 'must be greater than price (it is the original price before the discount)',
