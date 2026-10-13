@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import Order, { type IOrder, type IOrderItem } from '../models/Order';
 import Product from '../models/Product';
 
@@ -56,19 +57,32 @@ export async function buildOrderItems(items: RequestedItem[]): Promise<BuildItem
   return { ok: true, items: orderItems, subtotal };
 }
 
-// Generate order number
-const generateOrderNumber = (): string => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `ORD-${year}${month}${day}-${random}`;
+// Order number + phone are a guest's only credentials for viewing an order, so
+// the random part must be unguessable: 6 characters from a 30-letter alphabet
+// (no look-alikes 0/O, 1/I/L, and no U) is ~729 million per day, drawn with a
+// cryptographic RNG. The date is the shop's day in Bangladesh (UTC+6), not UTC.
+const ORDER_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
+const ORDER_CODE_LENGTH = 6;
+
+export const generateOrderNumber = (now: Date = new Date()): string => {
+  const date = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dhaka',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  })
+    .format(now)
+    .replace(/-/g, '');
+  let code = '';
+  for (let i = 0; i < ORDER_CODE_LENGTH; i++) {
+    code += ORDER_CODE_ALPHABET[randomInt(ORDER_CODE_ALPHABET.length)];
+  }
+  return `ORD-${date}-${code}`;
 };
 
 type NewOrderFields = Omit<Partial<IOrder>, 'orderNumber'>;
 
-// The unique orderNumber index can reject a random collision (1-in-1000/day) —
+// The unique orderNumber index can (very rarely) reject a random collision —
 // generating a fresh number and retrying is friendlier than erroring.
 // Returns null when three attempts all collided.
 export async function createOrderWithNumber(fields: NewOrderFields): Promise<IOrder | null> {

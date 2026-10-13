@@ -5,8 +5,16 @@ import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rat
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
+import { notifyNewOrder } from '../services/notify';
+
+// Re-exported so tests keep importing it from the route
+export { generateOrderNumber } from '../services/orderPricing';
 
 const router = Router();
+
+// Guest phone, same rule as checkout. Shared with the lookup so the query can
+// only ever be one plain phone string.
+const phoneSchema = z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01');
 
 // Delivery fee is SERVER-side config (.env DELIVERY_FEE) — the client never
 // decides what it pays. Read at call time so tests and deploys can change it.
@@ -21,7 +29,7 @@ const getDeliveryFee = (): number => {
 // them, so a spoofed "total: 1" can't be stored no matter what the client sends.
 const orderBodySchema = z.object({
   customerName: z.string().min(1).max(100),
-  phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01'),
+  phone: phoneSchema,
   address: z.string().min(5).max(500),
   notes: z.string().max(500).optional(),
   items: z
@@ -88,6 +96,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     data: order,
     message: 'Order placed successfully'
   });
+
+  // Alert the owner after the customer has their answer; notifyNewOrder never throws
+  void notifyNewOrder(order);
 });
 
 export const ORDER_SOURCES = ['facebook', 'whatsapp', 'phone', 'other'] as const;
@@ -188,19 +199,40 @@ const orderListQuerySchema = z.object({
   status: z.enum(ORDER_STATUSES).optional().catch(undefined)
 });
 
+// ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
+// so the admin can keep its list fresh without downloading every order each minute.
+// Unlike the lenient fields above, a bad time is a 400: silently ignoring it would
+// return the whole list and hide the client's bug.
+const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
+
 // GET /api/orders - Get all orders (Admin only - JWT required)
 router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
+  // Taken before the query: the client asks "changed since serverTime" next time, so a
+  // change landing while this request runs is picked up then instead of being missed
+  const serverTime = new Date().toISOString();
 
-  const query: { status?: OrderStatus } = {};
+  const since = updatedSinceSchema.safeParse(req.query.updatedSince);
+  if (!since.success) {
+    res.status(400).json({
+      success: false,
+      message: 'updatedSince must be an ISO date-time, e.g. 2026-10-13T07:45:00.000Z'
+    });
+    return;
+  }
+
+  const query: { status?: OrderStatus; updatedAt?: { $gte: Date } } = {};
   if (status) {
     query.status = status;
   }
+  if (since.data) {
+    query.updatedAt = { $gte: new Date(since.data) };
+  }
 
-  // Execute query
+  // Execute query (changes come oldest first so paging through them is stable)
   const orders = await Order.find(query)
-    .sort({ createdAt: -1 })
+    .sort(since.data ? { updatedAt: 1, _id: 1 } : { createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .select('-__v');
@@ -210,6 +242,7 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
   res.json({
     success: true,
     data: orders,
+    serverTime,
     pagination: {
       page,
       limit,
@@ -237,9 +270,8 @@ router.get('/delivery-fee', readLimiter, (_req: Request, res: Response): void =>
 // so nobody can probe which order numbers exist.)
 router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Response): Promise<void> => {
   const { orderNumber } = req.params;
-  const phone = req.query.phone as string | undefined;
 
-  if (!phone) {
+  if (req.query.phone === undefined) {
     res.status(400).json({
       success: false,
       message: 'Phone number is required to view an order'
@@ -247,7 +279,19 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone }).select('-__v');
+  // Exactly one well-formed phone. Repeated ?phone=a&phone=b arrives as an
+  // array, which Mongoose would turn into "phone is a OR b" and let one request
+  // try many phones; ?phone[$ne]=x arrives as an object. Both are refused here.
+  const phone = phoneSchema.safeParse(req.query.phone);
+  if (!phone.success) {
+    res.status(400).json({
+      success: false,
+      message: 'Send one phone number: 11 digits starting with 01'
+    });
+    return;
+  }
+
+  const order = await Order.findOne({ orderNumber, phone: phone.data }).select('-__v');
 
   if (!order) {
     res.status(404).json({
@@ -282,7 +326,7 @@ export const NEXT_STATUSES: Record<OrderStatus, OrderStatus[]> = {
 const orderDetailsSchema = z
   .strictObject({
     customerName: z.string().trim().min(1).max(100).optional(),
-    phone: z.string().regex(/^01\d{9}$/, 'phone must be 11 digits starting with 01').optional(),
+    phone: phoneSchema.optional(),
     address: z.string().trim().min(5).max(500).optional(),
     notes: z.string().trim().max(500).optional()
   })

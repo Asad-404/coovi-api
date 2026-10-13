@@ -119,5 +119,7 @@ const OrderSchema = new Schema<IOrder>(
 OrderSchema.index({ phone: 1 });
 OrderSchema.index({ status: 1 });
 OrderSchema.index({ createdAt: -1 });
+// "Changed since" lookups from the admin (GET /orders?updatedSince=)
+OrderSchema.index({ updatedAt: 1 });
 
 export default mongoose.model<IOrder>('Order', OrderSchema);

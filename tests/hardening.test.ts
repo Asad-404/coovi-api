@@ -13,6 +13,9 @@ const GOOD_PROD_ENV = {
   CLOUDINARY_CLOUD_NAME: 'demo-cloud',
   CLOUDINARY_API_KEY: '123456789012345',
   CLOUDINARY_API_SECRET: 'test-cloudinary-secret',
+  STOREFRONT_API_KEY: 's'.repeat(40),
+  EMAIL_API_KEY: 're_test_key',
+  NOTIFY_EMAIL_TO: 'owner@example.com',
 } as NodeJS.ProcessEnv;
 
 describe('checkEnv', () => {
@@ -51,6 +54,15 @@ describe('checkEnv', () => {
     const result = checkEnv({ ...GOOD_PROD_ENV, CLOUDINARY_API_SECRET: '' } as NodeJS.ProcessEnv);
     expect(result.errors).toEqual([]);
     expect(result.warnings.join(' ')).toMatch(/CLOUDINARY/);
+  });
+
+  it('warns when the storefront key is missing and fails production when it is short', () => {
+    const missing = checkEnv({ ...GOOD_PROD_ENV, STOREFRONT_API_KEY: '' } as NodeJS.ProcessEnv);
+    expect(missing.errors).toEqual([]);
+    expect(missing.warnings.join(' ')).toMatch(/STOREFRONT_API_KEY/);
+    expect(checkEnv({ ...GOOD_PROD_ENV, STOREFRONT_API_KEY: 'short' } as NodeJS.ProcessEnv).errors.join(' ')).toMatch(
+      /STOREFRONT_API_KEY/
+    );
   });
 });
 
