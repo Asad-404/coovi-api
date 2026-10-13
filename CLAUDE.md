@@ -29,6 +29,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs the typecheck and the tests on 
 - Order status is forward-only (`NEXT_STATUSES` in `src/routes/orders.ts`): Pending → Processing | Cancelled, Processing → Shipped | Cancelled, Shipped → Delivered; Delivered and Cancelled are final. Other transitions return 409.
 - Stock changes on status transitions: `Pending → Processing` decrements stock, and `Processing → Cancelled` restores it. The transition is claimed with a conditional update on the old status so concurrent requests can't double-apply stock.
 - Tests use mongodb-memory-server; where its binary download is blocked, point `MONGOMS_SYSTEM_BINARY` at a local `mongod`.
+- Public read and order-lookup limits (`src/middleware/rateLimiters.ts`) key on the visitor IP. The storefront server sends `STOREFRONT_API_KEY` in `x-coovi-storefront-key`; with it, `x-coovi-client-ip` is trusted as the shopper's IP, and without a shopper IP it gets its own larger bucket.
 - Register `/orders/delivery-fee` before `/orders/:orderNumber`; route ordering is significant.
 - API responses use the `{ success, data, message }` envelope where applicable, with validation and error handling at the API boundary.
 
