@@ -129,6 +129,39 @@ describe('POST /api/orders (server-computed totals — CC-1)', () => {
     expect(res.body.message).toContain('Only 5 left');
   });
 
+  it('adds up the same product on two lines before checking stock', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .send({
+        ...validOrderBody(),
+        items: [
+          { productId: redId, quantity: 3 },
+          { productId: redId, quantity: 3 }
+        ] // 6 in total, stock is 5
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('Only 5 left');
+    expect(res.body.message).toContain('you asked for 6');
+  });
+
+  it('places two lines of the same product as one line', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .send({
+        ...validOrderBody(),
+        items: [
+          { productId: blueId, quantity: 1 },
+          { productId: blueId, quantity: 2 }
+        ]
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.items).toHaveLength(1);
+    expect(res.body.data.items[0].quantity).toBe(3);
+    expect(res.body.data.subtotal).toBe(750);
+  });
+
   it('rejects a product the admin switched off (inStock: false) even with units left', async () => {
     await Product.updateOne({ _id: blueId }, { $set: { inStock: false } });
     const res = await request(app)

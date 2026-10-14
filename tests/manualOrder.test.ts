@@ -171,3 +171,18 @@ describe('Website orders', () => {
     expect(res.body.data.total).toBe(3000 + 70);
   });
 });
+
+describe('public order lookup of a manual order', () => {
+  it('never shows the customer which admin entered it', async () => {
+    const placed = await postManual(manualBody());
+    expect(placed.body.data.createdBy).toBe(TEST_ADMIN.email);
+
+    const tracked = await request(app)
+      .get(`/api/orders/${placed.body.data.orderNumber}`)
+      .query({ phone: '01812345678' });
+
+    expect(tracked.status).toBe(200);
+    expect(tracked.body.data).not.toHaveProperty('createdBy');
+    expect(JSON.stringify(tracked.body)).not.toContain(TEST_ADMIN.email);
+  });
+});
