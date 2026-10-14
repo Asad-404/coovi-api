@@ -15,7 +15,15 @@ export type BuildItemsResult =
 // image (CC-1: never trust the browser) — and checks each line can be sold.
 // Shared by the public checkout and the admin's manual order entry so both
 // price an order exactly the same way.
-export async function buildOrderItems(items: RequestedItem[]): Promise<BuildItemsResult> {
+export async function buildOrderItems(requested: RequestedItem[]): Promise<BuildItemsResult> {
+  // The same product on two lines becomes one line, so the stock check below sees the
+  // whole quantity (two lines of 1 must not both pass when only 1 is left)
+  const quantities = new Map<string, number>();
+  for (const { productId, quantity } of requested) {
+    quantities.set(productId, (quantities.get(productId) ?? 0) + quantity);
+  }
+  const items = [...quantities].map(([productId, quantity]) => ({ productId, quantity }));
+
   const productIds = items.map((item) => item.productId);
   const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays');
   const productMap = new Map(products.map((p) => [String(p._id), p]));

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import request from 'supertest';
 import app from '../src/app';
 import Product from '../src/models/Product';
-import { buildNewOrderEmail, notifyNewOrder } from '../src/services/notify';
+import { ALERT_WINDOW_MS, alertNewOrder, buildNewOrderEmail, buildOrdersSummaryEmail, notifyNewOrder, resetAlertWindow } from '../src/services/notify';
 
 const ORDER = {
   orderNumber: 'ORD-20261013-123',
@@ -22,6 +22,8 @@ const ORDER = {
 const CONFIGURED = { EMAIL_API_KEY: 're_test_key', NOTIFY_EMAIL_TO: 'owner@example.com, helper@example.com' } as NodeJS.ProcessEnv;
 
 afterEach(() => {
+  resetAlertWindow();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -87,6 +89,96 @@ describe('notifyNewOrder', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('bad key', { status: 401 })));
     await expect(notifyNewOrder(ORDER, CONFIGURED)).resolves.toBeUndefined();
     expect(console.error).toHaveBeenCalledTimes(2);
+  });
+
+  it('says so when Resend refuses because the sending limit is used up', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('daily quota exceeded', { status: 429 })));
+
+    await notifyNewOrder(ORDER, CONFIGURED);
+
+    expect(vi.mocked(console.error).mock.calls[0][0]).toContain('sending limit is used up');
+  });
+});
+
+describe('buildOrdersSummaryEmail', () => {
+  it('lists every order with the combined total, HTML escaped', () => {
+    const email = buildOrdersSummaryEmail([ORDER, { ...ORDER, orderNumber: 'ORD-20261013-456', total: 940 }], 'https://admin.example.com');
+
+    expect(email.subject).toBe('2 new orders: ৳12000');
+    expect(email.text).toContain('Open the admin: https://admin.example.com/orders');
+    expect(email.text).toContain('New order ORD-20261013-123');
+    expect(email.text).toContain('New order ORD-20261013-456');
+    expect(email.html).toContain('Rina &lt;b&gt;Akter&lt;/b&gt;');
+    expect(email.html).not.toContain('<b>Akter</b>');
+  });
+
+  it('shows at most 20 orders and counts the rest', () => {
+    const orders = Array.from({ length: 25 }, (_, i) => ({ ...ORDER, orderNumber: `ORD-20261013-${i}` }));
+    const email = buildOrdersSummaryEmail(orders);
+
+    expect(email.subject).toBe(`25 new orders: ৳${25 * ORDER.total}`);
+    expect(email.text).toContain('ORD-20261013-19');
+    expect(email.text).not.toContain('ORD-20261013-20');
+    expect(email.text).toContain('...and 5 more');
+  });
+});
+
+describe('alertNewOrder', () => {
+  const sentSubjects = (fetchMock: ReturnType<typeof vi.fn>) =>
+    fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).subject as string);
+
+  it('emails the first order at once and groups the next ones into one summary', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await alertNewOrder(ORDER, CONFIGURED);
+    expect(sentSubjects(fetchMock)).toEqual(['New order ORD-20261013-123: ৳11060 (includes pre-order)']);
+
+    await alertNewOrder({ ...ORDER, orderNumber: 'ORD-B' }, CONFIGURED);
+    await alertNewOrder({ ...ORDER, orderNumber: 'ORD-C' }, CONFIGURED);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(ALERT_WINDOW_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sentSubjects(fetchMock)[1]).toBe(`2 new orders: ৳${2 * ORDER.total}`);
+  });
+
+  it('sends one held order as a normal alert, and emails at once again after a quiet window', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await alertNewOrder(ORDER, CONFIGURED);
+    await alertNewOrder({ ...ORDER, orderNumber: 'ORD-B' }, CONFIGURED);
+    await vi.advanceTimersByTimeAsync(ALERT_WINDOW_MS);
+    expect(sentSubjects(fetchMock)[1]).toContain('New order ORD-B');
+
+    await vi.advanceTimersByTimeAsync(ALERT_WINDOW_MS);
+    await alertNewOrder({ ...ORDER, orderNumber: 'ORD-C' }, CONFIGURED);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sentSubjects(fetchMock)[2]).toContain('New order ORD-C');
+  });
+
+  it('a burst of 100 orders sends 2 emails, not 100', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    for (let i = 0; i < 100; i++) await alertNewOrder({ ...ORDER, orderNumber: `ORD-${i}` }, CONFIGURED);
+    await vi.advanceTimersByTimeAsync(ALERT_WINDOW_MS);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does nothing when email is not configured', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await alertNewOrder(ORDER, {} as NodeJS.ProcessEnv);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

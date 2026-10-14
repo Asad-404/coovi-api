@@ -8,12 +8,19 @@ import { loginLimiter } from '../middleware/rateLimiters';
 
 const router = Router();
 
+// Two plain strings: anything else (an object, a number) is a 400 instead of
+// crashing bcrypt with a 500. The max lengths stop huge bodies being hashed.
+const loginBodySchema = z.object({
+  email: z.string().trim().min(1).max(254),
+  password: z.string().min(1).max(100)
+});
+
 // POST /api/auth/login - Exchange email + password for a JWT token
 // (no try/catch — errors fall through to the global error handler)
 router.post('/login', loginLimiter, async (req: Request, res: Response): Promise<void> => {
-  const { email, password } = req.body;
+  const parsed = loginBodySchema.safeParse(req.body);
 
-  if (!email || !password) {
+  if (!parsed.success) {
     res.status(400).json({
       success: false,
       message: 'Email and password are required'
@@ -21,7 +28,8 @@ router.post('/login', loginLimiter, async (req: Request, res: Response): Promise
     return;
   }
 
-  const admin = await Admin.findOne({ email: String(email).toLowerCase() });
+  const { email, password } = parsed.data;
+  const admin = await Admin.findOne({ email: email.toLowerCase() });
 
   // Same message for wrong email AND wrong password (don't reveal which one)
   if (!admin) {

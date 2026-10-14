@@ -20,7 +20,7 @@ import {
   resolveDeliveryArea
 } from '../services/deliveryFees';
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
-import { notifyNewOrder } from '../services/notify';
+import { alertNewOrder } from '../services/notify';
 
 // Re-exported so tests keep importing it from the route
 export { generateOrderNumber } from '../services/orderPricing';
@@ -29,7 +29,8 @@ const router = Router();
 
 // Admin-only fields. Every response a customer can see (placing an order,
 // public tracking) leaves these out; the admin routes return everything.
-export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked'] as const;
+// createdBy is the email an admin signs in with, so a customer must never see it.
+export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked', 'createdBy'] as const;
 // courier.bookingStartedAt is the Steadfast booking lock, internal only
 const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`), '-courier.bookingStartedAt'].join(' ');
 
@@ -131,8 +132,9 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
     message: 'Order placed successfully'
   });
 
-  // Alert the owner after the customer has their answer; notifyNewOrder never throws
-  void notifyNewOrder(order);
+  // Alert the owner after the customer has their answer; alertNewOrder never throws
+  // and groups orders that arrive close together into one email
+  void alertNewOrder(order);
 });
 
 export const ORDER_SOURCES = ['facebook', 'whatsapp', 'phone', 'other'] as const;
