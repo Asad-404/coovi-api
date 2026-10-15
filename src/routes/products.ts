@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAdmin, requirePermission } from '../middleware/auth';
 import { readLimiter } from '../middleware/rateLimiters';
 import Product from '../models/Product';
+import { deleteProductPhotos } from '../services/productPhotos';
 
 const router = Router();
 
@@ -301,6 +302,9 @@ router.delete('/:id', requireAdmin, requirePermission('products.delete'), async 
     });
     return;
   }
+
+  // Best effort: the product is gone even if Cloudinary can't be reached
+  await deleteProductPhotos(product.images);
 
   res.json({
     success: true,

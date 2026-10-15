@@ -5,7 +5,7 @@ import { requireAdmin, requirePermission } from '../middleware/auth';
 const router = Router();
 
 // Every product photo lands in this one Cloudinary folder
-const UPLOAD_FOLDER = 'coovi/products';
+export const UPLOAD_FOLDER = 'coovi/products';
 
 // Cloudinary's signing rule: the upload parameters sorted A-Z and joined like a query
 // string, then the API secret glued on the end, then SHA-1 of the whole text.
