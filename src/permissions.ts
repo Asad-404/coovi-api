@@ -42,6 +42,8 @@ const NEEDS: Partial<Record<Permission, Permission>> = {
   'orders.export': 'orders.view',
   'products.edit': 'products.view',
   'products.delete': 'products.view',
+  // Revenue is worked out from the order list for now, so it needs the orders
+  'money.view': 'orders.view',
   'payments.edit': 'payments.view',
   'settings.edit': 'settings.view'
 };
