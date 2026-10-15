@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import Admin, { IAdmin } from '../models/Admin';
 import { requireAdmin } from '../middleware/auth';
 import { loginLimiter } from '../middleware/rateLimiters';
+import { effectivePermissions, isCustomized } from '../permissions';
 
 const router = Router();
 
@@ -79,7 +80,8 @@ router.post('/login', loginLimiter, async (req: Request, res: Response): Promise
         id: admin._id,
         email: admin.email,
         name: admin.name,
-        role: admin.role
+        role: admin.role,
+        permissions: effectivePermissions(admin.role, admin.permissions)
       }
     },
     message: 'Login successful'
@@ -88,7 +90,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response): Promise
 
 // GET /api/auth/me - Return the current admin (from the Bearer token)
 router.get('/me', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const admin = await Admin.findById(req.admin?.id).select('-passwordHash -tokenVersion');
+  const admin = await Admin.findById(req.admin?.id).select('-passwordHash -tokenVersion').lean();
 
   if (!admin) {
     res.status(404).json({
@@ -98,9 +100,15 @@ router.get('/me', requireAdmin, async (req: Request, res: Response): Promise<voi
     return;
   }
 
+  // permissions is what this person can actually do (everything for owners);
+  // the admin panel shows and hides pages from it
   res.json({
     success: true,
-    data: admin
+    data: {
+      ...admin,
+      permissions: effectivePermissions(admin.role, admin.permissions),
+      customized: isCustomized(admin.role, admin.permissions)
+    }
   });
 });
 

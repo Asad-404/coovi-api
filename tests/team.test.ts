@@ -19,14 +19,20 @@ const tokenFor = async (email: string, password: string): Promise<string> => {
 
 let ownerToken: string;
 
-const addStaff = async (email: string, password = 'staff-pass-123') => {
+type Member = { _id: string; email: string; role: string; active: boolean; permissions: string[]; customized: boolean };
+
+const addMember = async (email: string, role = 'staff', extra: Record<string, unknown> = {}) => {
   const res = await request(app)
     .post('/api/admins')
     .set('Authorization', `Bearer ${ownerToken}`)
-    .send({ email, name: 'Helper', role: 'staff', password });
+    .send({ email, name: 'Helper', role, password: 'staff-pass-123', ...extra });
   expect(res.status).toBe(201);
-  return res.body.data as { _id: string; email: string; role: string; active: boolean };
+  return res.body.data as Member;
 };
+const addStaff = (email: string) => addMember(email, 'staff');
+
+const NO_ACCESS = 'You do not have access to this. Ask the shop owner.';
+const OWNER_ONLY = 'Only the shop owner can do this';
 
 beforeAll(async () => {
   ownerToken = await tokenFor(OWNER.email, OWNER.password);
@@ -90,17 +96,23 @@ describe('owner and staff roles', () => {
     const staffToken = await tokenFor('helper2@coovi.com', 'staff-pass-123');
     const auth = { Authorization: `Bearer ${staffToken}` };
 
-    const blocked = [
+    const noAccess = [
       await request(app).get('/api/courier-payments').set(auth),
       await request(app).get('/api/courier-payments/unpaid').set(auth),
       await request(app).patch('/api/settings').set(auth).send({ announcement: 'x' }),
-      await request(app).delete(`/api/products/${MISSING_ID}`).set(auth),
+      await request(app).delete(`/api/products/${MISSING_ID}`).set(auth)
+    ];
+    for (const res of noAccess) {
+      expect(res.status).toBe(403);
+      expect(res.body.message).toBe(NO_ACCESS);
+    }
+    const ownerOnly = [
       await request(app).get('/api/admins').set(auth),
       await request(app).post('/api/admins').set(auth).send({ email: 'x@coovi.com', name: 'X', role: 'owner', password: 'whatever-123' })
     ];
-    for (const res of blocked) {
+    for (const res of ownerOnly) {
       expect(res.status).toBe(403);
-      expect(res.body.message).toBe('Only the shop owner can do this');
+      expect(res.body.message).toBe(OWNER_ONLY);
     }
 
     // The owner gets past the role check on the same routes
@@ -141,20 +153,27 @@ describe('owner and staff roles', () => {
     expect((await login('helper3@coovi.com', 'staff-pass-123')).status).toBe(200);
   });
 
-  it('a role change takes effect at once', async () => {
+  it('a role change applies on the next request, without signing out', async () => {
     const staff = await addStaff('helper4@coovi.com');
     const staffToken = await tokenFor('helper4@coovi.com', 'staff-pass-123');
+    const payments = () => request(app).get('/api/courier-payments').set('Authorization', `Bearer ${staffToken}`);
+    expect((await payments()).status).toBe(403);
 
     const promote = await request(app)
       .patch(`/api/admins/${staff._id}`)
       .set('Authorization', `Bearer ${ownerToken}`)
-      .send({ role: 'owner' });
+      .send({ role: 'manager' });
     expect(promote.status).toBe(200);
-    expect((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${staffToken}`)).status).toBe(401);
+    expect(promote.body.data.permissions).toContain('payments.edit');
+    expect(promote.body.data.customized).toBe(false);
+    expect((await payments()).status).toBe(200);
 
-    const ownerNow = await tokenFor('helper4@coovi.com', 'staff-pass-123');
-    const team = await request(app).get('/api/admins').set('Authorization', `Bearer ${ownerNow}`);
-    expect(team.status).toBe(200);
+    const toOwner = await request(app)
+      .patch(`/api/admins/${staff._id}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ role: 'owner' });
+    expect(toOwner.status).toBe(200);
+    expect((await request(app).get('/api/admins').set('Authorization', `Bearer ${staffToken}`)).status).toBe(200);
 
     // Back to staff so the last-owner test below starts from one owner
     const demote = await request(app)
@@ -162,6 +181,73 @@ describe('owner and staff roles', () => {
       .set('Authorization', `Bearer ${ownerToken}`)
       .send({ role: 'staff' });
     expect(demote.status).toBe(200);
+    expect((await payments()).status).toBe(403);
+  });
+
+  it('a viewer can read orders and products but change nothing', async () => {
+    const viewer = await addMember('viewer1@coovi.com', 'viewer');
+    expect(viewer.permissions).toEqual(['orders.view', 'products.view']);
+    const auth = { Authorization: `Bearer ${await tokenFor('viewer1@coovi.com', 'staff-pass-123')}` };
+
+    expect((await request(app).get('/api/orders').set(auth)).status).toBe(200);
+    const writes = [
+      await request(app).patch(`/api/orders/${MISSING_ID}/status`).set(auth).send({ status: 'Processing' }),
+      await request(app).patch(`/api/orders/${MISSING_ID}`).set(auth).send({ customerName: 'X' }),
+      await request(app).post(`/api/orders/${MISSING_ID}/notes`).set(auth).send({ text: 'x' }),
+      await request(app).post('/api/orders/manual').set(auth).send({}),
+      await request(app).post('/api/products').set(auth).send({}),
+      await request(app).put(`/api/products/${MISSING_ID}`).set(auth).send({}),
+      await request(app).post('/api/uploads/signature').set(auth)
+    ];
+    for (const res of writes) {
+      expect(res.status).toBe(403);
+      expect(res.body.message).toBe(NO_ACCESS);
+    }
+  });
+
+  it('lets the owner adjust one person and reset them to their role', async () => {
+    const viewer = await addMember('viewer2@coovi.com', 'viewer');
+    const auth = { Authorization: `Bearer ${await tokenFor('viewer2@coovi.com', 'staff-pass-123')}` };
+    const changeStatus = () =>
+      request(app).patch(`/api/orders/${MISSING_ID}/status`).set(auth).send({ status: 'Processing' });
+    expect((await changeStatus()).status).toBe(403);
+
+    // Edit brings its view with it; the person shows as customized
+    const adjust = await request(app)
+      .patch(`/api/admins/${viewer._id}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ permissions: ['orders.edit', 'products.view', 'payments.edit'] });
+    expect(adjust.status).toBe(200);
+    expect(adjust.body.data.permissions).toEqual([
+      'orders.view',
+      'orders.edit',
+      'products.view',
+      'payments.view',
+      'payments.edit'
+    ]);
+    expect(adjust.body.data.customized).toBe(true);
+    expect((await changeStatus()).status).not.toBe(403);
+
+    const me = await request(app).get('/api/auth/me').set(auth);
+    expect(me.body.data.customized).toBe(true);
+    expect(me.body.data.permissions).toContain('orders.edit');
+
+    // Picking the role again puts its ticks back
+    const reset = await request(app)
+      .patch(`/api/admins/${viewer._id}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ role: 'viewer' });
+    expect(reset.body.data.permissions).toEqual(['orders.view', 'products.view']);
+    expect(reset.body.data.customized).toBe(false);
+    expect((await changeStatus()).status).toBe(403);
+  });
+
+  it('can create someone with their own ticks', async () => {
+    const custom = await addMember('custom1@coovi.com', 'viewer', { permissions: ['settings.edit'] });
+    expect(custom.permissions).toEqual(['settings.view', 'settings.edit']);
+    expect(custom.customized).toBe(true);
+    const signIn = await login('custom1@coovi.com', 'staff-pass-123');
+    expect(signIn.body.data.admin.permissions).toEqual(['settings.view', 'settings.edit']);
   });
 
   it('resetting a password signs the person out and sets the new one', async () => {
@@ -208,7 +294,8 @@ describe('owner and staff roles', () => {
       { email: 'not-an-email', name: 'X', role: 'staff', password: 'staff-pass-123' },
       { email: 'ok@coovi.com', name: 'X', role: 'admin', password: 'staff-pass-123' },
       { email: 'ok@coovi.com', name: 'X', role: 'staff', password: 'short' },
-      { email: 'ok@coovi.com', name: 'X', role: 'staff', password: 'staff-pass-123', active: false }
+      { email: 'ok@coovi.com', name: 'X', role: 'staff', password: 'staff-pass-123', active: false },
+      { email: 'ok@coovi.com', name: 'X', role: 'staff', password: 'staff-pass-123', permissions: ['everything'] }
     ];
     for (const body of bad) {
       expect((await request(app).post('/api/admins').set(auth).send(body)).status).toBe(400);
@@ -220,6 +307,12 @@ describe('owner and staff roles', () => {
     expect((await request(app).patch(`/api/admins/${empty!._id}`).set(auth).send({})).status).toBe(400);
 
     const owner = await Admin.findOne({ email: OWNER.email }).lean();
+    const ownerTicks = await request(app)
+      .patch(`/api/admins/${owner!._id}`)
+      .set(auth)
+      .send({ permissions: ['orders.view'] });
+    expect(ownerTicks.status).toBe(400);
+
     const self = await request(app)
       .post(`/api/admins/${owner!._id}/reset-password`)
       .set(auth)

@@ -1,16 +1,18 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { PERMISSIONS, ROLES, Role } from '../permissions';
 
-// owner: everything. staff: orders and products, but no money, settings, team or
-// product delete. 'admin' is the role every account had before roles existed; it
-// is turned into 'owner' on startup (src/index.ts) and treated as owner until then.
-export const ADMIN_ROLES = ['owner', 'staff'] as const;
-export type AdminRole = (typeof ADMIN_ROLES)[number] | 'admin';
+// Roles are in src/permissions.ts. 'admin' is the role every account had before
+// roles existed; it is turned into 'owner' on startup (src/index.ts) and treated
+// as owner until then.
+export type AdminRole = Role | 'admin';
 
 export interface IAdmin extends Document {
   email: string;
   passwordHash: string;
   name: string;
   role: AdminRole;
+  // This person's own ticks (ignored for owners, who can do everything)
+  permissions: string[];
   active: boolean;
   tokenVersion: number;
   createdAt: Date;
@@ -36,8 +38,12 @@ const AdminSchema = new Schema<IAdmin>(
     },
     role: {
       type: String,
-      enum: [...ADMIN_ROLES, 'admin'],
-      default: 'staff'
+      enum: [...ROLES, 'admin'],
+      default: 'viewer'
+    },
+    permissions: {
+      type: [{ type: String, enum: PERMISSIONS }],
+      default: []
     },
     // A switched-off account can't sign in, and its existing sign-ins stop working
     active: {
@@ -45,7 +51,7 @@ const AdminSchema = new Schema<IAdmin>(
       default: true
     },
     // Copied into every token at sign-in. Raising it (password change or reset,
-    // role change, switched off) makes every older token for this account invalid.
+    // switched off) makes every older token for this account invalid.
     tokenVersion: {
       type: Number,
       default: 0

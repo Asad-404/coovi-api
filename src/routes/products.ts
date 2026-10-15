@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { requireAdmin, requireOwner } from '../middleware/auth';
+import { requireAdmin, requirePermission } from '../middleware/auth';
 import { readLimiter } from '../middleware/rateLimiters';
 import Product from '../models/Product';
 
@@ -175,7 +175,7 @@ router.get('/:slug', readLimiter, async (req: Request, res: Response): Promise<v
 });
 
 // POST /api/products - Create new product (Admin only - JWT required)
-router.post('/', requireAdmin, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+router.post('/', requireAdmin, requirePermission('products.edit'), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const parsed = productCreateSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -209,7 +209,7 @@ router.post('/', requireAdmin, async (req: Request, res: Response, next: NextFun
 });
 
 // PUT /api/products/:id - Update product (Admin only - JWT required)
-router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.put('/:id', requireAdmin, requirePermission('products.edit'), async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
 
   const parsed = productUpdateSchema.safeParse(req.body);
@@ -248,8 +248,8 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<vo
   });
 });
 
-// DELETE /api/products/:id - Delete product (owner only; staff switch a product off instead)
-router.delete('/:id', requireAdmin, requireOwner, async (req: Request, res: Response): Promise<void> => {
+// DELETE /api/products/:id - Delete product (needs products.delete)
+router.delete('/:id', requireAdmin, requirePermission('products.delete'), async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   const product = await Product.findByIdAndDelete(id);
 

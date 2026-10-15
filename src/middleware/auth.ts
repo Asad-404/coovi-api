@@ -2,9 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import Admin from '../models/Admin';
 import { AdminPayload } from '../types';
+import { Permission, effectivePermissions, isOwnerRole } from '../permissions';
 
-// The role every account had before roles existed counts as owner
-export const isOwnerRole = (role: string | undefined): boolean => role === 'owner' || role === 'admin';
+export { isOwnerRole };
 
 const unauthorized = (res: Response): void => {
   res.status(401).json({
@@ -15,8 +15,9 @@ const unauthorized = (res: Response): void => {
 
 // Verifies the "Authorization: Bearer <token>" header before admin routes, then
 // checks the account in the database: a switched-off account, or a token signed
-// before the last password change, reset or role change, is refused at once
-// instead of working until the token's one-day expiry.
+// before the last password change or reset, is refused at once instead of
+// working until the token's one-day expiry. Role and permissions are read here
+// on every request, so changing someone's access applies on their next click.
 export const requireAdmin = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
 
@@ -39,7 +40,7 @@ export const requireAdmin = async (req: Request, res: Response, next: NextFuncti
     return;
   }
 
-  const admin = await Admin.findById(decoded.id).select('email role active tokenVersion').lean();
+  const admin = await Admin.findById(decoded.id).select('email role permissions active tokenVersion').lean();
 
   // Tokens from before this check have no tv, so they stop working once: sign in again
   if (!admin || !admin.active || decoded.tv !== admin.tokenVersion) {
@@ -47,22 +48,39 @@ export const requireAdmin = async (req: Request, res: Response, next: NextFuncti
     return;
   }
 
-  // Role and email come from the database, not the token, so they are always current
-  req.admin = { id: String(admin._id), email: admin.email, role: admin.role, tv: admin.tokenVersion };
+  req.admin = {
+    id: String(admin._id),
+    email: admin.email,
+    role: admin.role,
+    tv: admin.tokenVersion,
+    permissions: effectivePermissions(admin.role, admin.permissions)
+  };
   next();
 };
 
-// Owner-only routes (money, settings, team, product delete). Use after requireAdmin.
+const forbidden = (res: Response, message: string): void => {
+  res.status(403).json({ success: false, message });
+};
+
+// Team management: owners only. Use after requireAdmin.
 export const requireOwner = (req: Request, res: Response, next: NextFunction): void => {
   if (!isOwnerRole(req.admin?.role)) {
-    res.status(403).json({
-      success: false,
-      message: 'Only the shop owner can do this'
-    });
+    forbidden(res, 'Only the shop owner can do this');
     return;
   }
   next();
 };
+
+// One ticked permission (owners have them all). Use after requireAdmin.
+export const requirePermission =
+  (permission: Permission) =>
+  (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.admin?.permissions?.includes(permission)) {
+      forbidden(res, 'You do not have access to this. Ask the shop owner.');
+      return;
+    }
+    next();
+  };
 
 // Who did it: stamped on order notes and history entries. Only call it on
 // routes behind requireAdmin, where req.admin is always set.

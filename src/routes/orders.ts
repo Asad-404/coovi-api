@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Types } from 'mongoose';
 import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
-import { actor, requireAdmin } from '../middleware/auth';
+import { actor, requireAdmin, requirePermission } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
 import Order, { type IOrder } from '../models/Order';
 import Product from '../models/Product';
@@ -146,7 +146,7 @@ const manualOrderSchema = z.strictObject({
 
 // POST /api/orders/manual - Enter an order taken outside the website (Admin only - JWT required)
 // Not rate-limited like checkout: the admin is trusted and may enter many orders in a row.
-router.post('/manual', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.post('/manual', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = manualOrderSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -246,7 +246,7 @@ const orderListQuerySchema = z.object({
 const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
-router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.get('/', requireAdmin, requirePermission('orders.view'), async (req: Request, res: Response): Promise<void> => {
   const { page, limit, status, deliveryArea } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
   // Taken before the query: the client asks "changed since serverTime" next time, so a
@@ -388,7 +388,7 @@ const orderDetailsSchema = z
 const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled', 'Returned'];
 
 // PATCH /api/orders/:id - Edit customer/delivery details (Admin only - JWT required)
-router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.patch('/:id', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = orderDetailsSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -506,7 +506,7 @@ const statusBodySchema = z.object({
 });
 
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
-router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.patch('/:id/status', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   const parsed = statusBodySchema.safeParse(req.body);
 
@@ -667,7 +667,7 @@ const noteBodySchema = z.object({ text: z.string().trim().min(1).max(500) });
 
 // POST /api/orders/:id/notes - Add a private note (Admin only - JWT required).
 // Allowed at any status: a call after delivery about a return still needs writing down.
-router.post('/:id/notes', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.post('/:id/notes', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = noteBodySchema.safeParse(req.body);
 
   if (!parsed.success) {
