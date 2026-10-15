@@ -16,6 +16,7 @@ import {
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
 import { alertNewOrder } from '../services/notify';
 import { DAY_MS, isDhakaDay, startOfDhakaDay } from '../services/dhakaDays';
+import BlockedPhone from '../models/BlockedPhone';
 
 // Re-exported so tests keep importing it from the route
 export { generateOrderNumber } from '../services/orderPricing';
@@ -307,9 +308,17 @@ router.get('/', requireAdmin, requirePermission('orders.view'), async (req: Requ
 
   const total = await Order.countDocuments(query);
 
+  // Orders from a blocked phone are still taken, but carry the block so the admin
+  // shows them in red and someone calls before shipping
+  const blocks = await BlockedPhone.find({ phone: { $in: [...new Set(orders.map((o) => o.phone))] } }).lean();
+  const blockByPhone = new Map(blocks.map((b) => [b.phone, { note: b.note, by: b.by, at: b.createdAt }]));
+
   res.json({
     success: true,
-    data: orders,
+    data: orders.map((order) => {
+      const block = blockByPhone.get(order.phone);
+      return block ? { ...order.toJSON(), blockedPhone: block } : order;
+    }),
     serverTime,
     pagination: {
       page,
