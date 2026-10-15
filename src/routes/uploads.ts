@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { createHash } from 'crypto';
-import { requireAdmin } from '../middleware/auth';
+import { requireAdmin, requirePermission } from '../middleware/auth';
 
 const router = Router();
 
@@ -20,7 +20,7 @@ export function signUpload(params: Record<string, string | number>, apiSecret: s
 
 // POST /api/uploads/signature - Give the admin panel a short-lived signature so the browser
 // can send a photo straight to Cloudinary. The API secret itself never leaves this server.
-router.post('/signature', requireAdmin, (_req: Request, res: Response): void => {
+router.post('/signature', requireAdmin, requirePermission('products.edit'), (_req: Request, res: Response): void => {
   // Read at call time, not import time: dotenv loads after imports in index.ts
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;

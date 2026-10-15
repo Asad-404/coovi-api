@@ -17,11 +17,14 @@ const startServer = async () => {
 
     await connectToDatabase();
 
-    // Auto-seed the admin account on first run (ADMIN_EMAIL / ADMIN_PASSWORD in .env)
+    // Accounts from before roles existed become owners (safe to run on every start)
+    await Admin.updateMany({ role: 'admin' }, { $set: { role: 'owner' } });
+
+    // Auto-seed the owner account on first run (ADMIN_EMAIL / ADMIN_PASSWORD in .env)
     if ((await Admin.countDocuments()) === 0) {
       if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
         const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
-        await Admin.create({ email: process.env.ADMIN_EMAIL.toLowerCase(), passwordHash });
+        await Admin.create({ email: process.env.ADMIN_EMAIL.toLowerCase(), passwordHash, role: 'owner' });
         console.log(`🌱 Admin account created: ${process.env.ADMIN_EMAIL}`);
       } else {
         console.warn('⚠️  ADMIN_EMAIL / ADMIN_PASSWORD not set in .env — admin login disabled');

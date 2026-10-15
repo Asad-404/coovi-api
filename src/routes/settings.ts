@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { requireAdmin, requirePermission } from '../middleware/auth';
 import { readLimiter } from '../middleware/rateLimiters';
 import { getSettings, publicSettings, updateSettings } from '../services/settings';
 
@@ -28,13 +28,15 @@ router.get('/', readLimiter, async (_req: Request, res: Response): Promise<void>
   res.json({ success: true, data: publicSettings(settings) });
 });
 
-// GET /api/settings/admin - Every setting, for the admin settings page
+// GET /api/settings/admin - Every setting, for the admin settings page. Open to every
+// signed-in team member: nothing here is secret, and the dashboard and product list
+// need the low-stock limit. Changing settings needs settings.edit.
 router.get('/admin', requireAdmin, async (_req: Request, res: Response): Promise<void> => {
   res.json({ success: true, data: await getSettings() });
 });
 
 // PATCH /api/settings - Change one or more settings (Admin only)
-router.patch('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.patch('/', requireAdmin, requirePermission('settings.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = settingsBodySchema.safeParse(req.body);
 
   if (!parsed.success) {

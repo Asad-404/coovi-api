@@ -1,15 +1,17 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { requireAdmin, requirePermission } from '../middleware/auth';
 import Order from '../models/Order';
 import CourierPayment, { PAYMENT_METHODS } from '../models/CourierPayment';
 
 // Cash on delivery money comes back through the courier, days after delivery,
 // minus its charges. These routes record each payout by hand from the courier's
 // statement and show which delivered orders the courier still owes money for.
-// Every route is admin only.
+// Reading needs payments.view and recording or deleting needs payments.edit.
 const router = Router();
 router.use(requireAdmin);
+const canView = requirePermission('payments.view');
+const canEdit = requirePermission('payments.edit');
 
 // Taka with paisa: round once on the server so totals never drift by 0.0000001
 const round2 = (value: number): number => Math.round(value * 100) / 100;
@@ -51,7 +53,7 @@ const listQuerySchema = z.object({
 
 // GET /api/courier-payments/unpaid - Delivered orders no payment covers yet.
 // Registered before /:id so "unpaid" is not read as an id.
-router.get('/unpaid', async (_req: Request, res: Response): Promise<void> => {
+router.get('/unpaid', canView, async (_req: Request, res: Response): Promise<void> => {
   const paidOrderIds = await CourierPayment.distinct('lines.order');
   const orders = await Order.find({ status: 'Delivered', _id: { $nin: paidOrderIds } })
     .sort({ updatedAt: 1 })
@@ -68,7 +70,7 @@ router.get('/unpaid', async (_req: Request, res: Response): Promise<void> => {
 });
 
 // GET /api/courier-payments - Recorded payments, newest first, with all-time totals
-router.get('/', async (req: Request, res: Response): Promise<void> => {
+router.get('/', canView, async (req: Request, res: Response): Promise<void> => {
   const { page, limit } = listQuerySchema.parse(req.query);
 
   const [payments, total, totals] = await Promise.all([
@@ -107,7 +109,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 });
 
 // GET /api/courier-payments/:id - One payment with its order lines
-router.get('/:id', async (req: Request, res: Response): Promise<void> => {
+router.get('/:id', canView, async (req: Request, res: Response): Promise<void> => {
   const payment = await CourierPayment.findById(req.params.id).select('-__v');
 
   if (!payment) {
@@ -121,7 +123,7 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
 // POST /api/courier-payments - Record a payout from the courier's statement.
 // The admin types what the statement says per parcel (cash collected, charge);
 // the server looks up each order and computes every total.
-router.post('/', async (req: Request, res: Response): Promise<void> => {
+router.post('/', canEdit, async (req: Request, res: Response): Promise<void> => {
   const parsed = paymentBodySchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -228,7 +230,7 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 
 // DELETE /api/courier-payments/:id - Remove a payment entered by mistake; its
 // orders show as unpaid again so it can be re-entered correctly
-router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
+router.delete('/:id', canEdit, async (req: Request, res: Response): Promise<void> => {
   const payment = await CourierPayment.findByIdAndDelete(req.params.id);
 
   if (!payment) {
