@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { requireAdmin, requireOwner } from '../middleware/auth';
 import { readLimiter } from '../middleware/rateLimiters';
 import Product from '../models/Product';
 
@@ -248,8 +248,8 @@ router.put('/:id', requireAdmin, async (req: Request, res: Response): Promise<vo
   });
 });
 
-// DELETE /api/products/:id - Delete product (Admin only - JWT required)
-router.delete('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+// DELETE /api/products/:id - Delete product (owner only; staff switch a product off instead)
+router.delete('/:id', requireAdmin, requireOwner, async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   const product = await Product.findByIdAndDelete(id);
 

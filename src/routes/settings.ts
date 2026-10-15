@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { requireAdmin, requireOwner } from '../middleware/auth';
 import { readLimiter } from '../middleware/rateLimiters';
 import { getSettings, publicSettings, updateSettings } from '../services/settings';
 
@@ -34,7 +34,7 @@ router.get('/admin', requireAdmin, async (_req: Request, res: Response): Promise
 });
 
 // PATCH /api/settings - Change one or more settings (Admin only)
-router.patch('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.patch('/', requireAdmin, requireOwner, async (req: Request, res: Response): Promise<void> => {
   const parsed = settingsBodySchema.safeParse(req.body);
 
   if (!parsed.success) {

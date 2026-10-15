@@ -9,6 +9,7 @@ import orderRoutes from './routes/orders';
 import uploadRoutes from './routes/uploads';
 import courierPaymentRoutes from './routes/courierPayments';
 import settingsRoutes from './routes/settings';
+import adminRoutes from './routes/admins';
 import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
@@ -69,6 +70,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/courier-payments', courierPaymentRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/admins', adminRoutes);
 
 // 404 handler
 app.use((_req: Request, res: Response) => {

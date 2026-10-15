@@ -1,15 +1,15 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { requireAdmin } from '../middleware/auth';
+import { requireAdmin, requireOwner } from '../middleware/auth';
 import Order from '../models/Order';
 import CourierPayment, { PAYMENT_METHODS } from '../models/CourierPayment';
 
 // Cash on delivery money comes back through the courier, days after delivery,
 // minus its charges. These routes record each payout by hand from the courier's
 // statement and show which delivered orders the courier still owes money for.
-// Every route is admin only.
+// Every route is owner only: it is the shop's money.
 const router = Router();
-router.use(requireAdmin);
+router.use(requireAdmin, requireOwner);
 
 // Taka with paisa: round once on the server so totals never drift by 0.0000001
 const round2 = (value: number): number => Math.round(value * 100) / 100;
