@@ -33,6 +33,14 @@ export interface IStatusChange {
   at: Date;
 }
 
+// Who called the customer and confirmed the order is real (the website can't
+// check that the phone belongs to the person ordering)
+export interface ICallConfirmed {
+  by: string;
+  byId?: string;
+  at: Date;
+}
+
 export interface IDetailEdit {
   changes: { field: string; from?: string; to?: string }[];
   by: string;
@@ -66,6 +74,8 @@ export interface IOrder extends Document {
   source: 'website' | 'facebook' | 'whatsapp' | 'phone' | 'other';
   // Email of the admin who entered a manual order
   createdBy?: string;
+  // Set when an admin has called the customer and they confirmed the order
+  callConfirmed?: ICallConfirmed;
   // Admin-only (see PRIVATE_ORDER_FIELDS in routes/orders.ts): never shown to the customer
   internalNotes: IOrderNote[];
   statusHistory: IStatusChange[];
@@ -163,6 +173,14 @@ const OrderSchema = new Schema<IOrder>(
     },
     createdBy: {
       type: String
+    },
+    callConfirmed: {
+      type: new Schema({
+        by: { type: String, required: true },
+        byId: { type: String },
+        at: { type: Date, required: true }
+      }, { _id: false }),
+      required: false
     },
     // Append-only: no route edits or deletes these, so the record can be trusted.
     // Orders placed before this existed simply have empty arrays.
