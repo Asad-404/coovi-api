@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAdmin, requirePermission } from '../middleware/auth';
 import Order, { type IOrder } from '../models/Order';
 import CourierPayment from '../models/CourierPayment';
+import { DAY_MS, DAY_PATTERN, dhakaDay, isDhakaDay, startOfDhakaDay } from '../services/dhakaDays';
 
 // GET /api/stats - The admin dashboard's numbers, worked out here from every
 // order in the range (the admin's order list is paged, so the browser can't).
@@ -11,18 +12,12 @@ import CourierPayment from '../models/CourierPayment';
 const router = Router();
 router.use(requireAdmin, requirePermission('orders.view'));
 
-// The shop runs on Bangladesh time (UTC+6, no daylight saving), so a "day" is a Dhaka day
-const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_DAYS = 366;
-
-const dhakaDay = (date: Date): string => new Date(date.getTime() + DHAKA_OFFSET_MS).toISOString().slice(0, 10);
-const startOfDhakaDay = (day: string): Date => new Date(`${day}T00:00:00+06:00`);
 
 const dayString = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date like 2026-10-15')
-  .refine((d) => !Number.isNaN(startOfDhakaDay(d).getTime()), 'must be a real date');
+  .regex(DAY_PATTERN, 'must be a date like 2026-10-15')
+  .refine(isDhakaDay, 'must be a real date');
 
 const statsQuerySchema = z.object({
   from: dayString.optional(),
