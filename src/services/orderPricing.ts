@@ -25,7 +25,7 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
   const items = [...quantities].map(([productId, quantity]) => ({ productId, quantity }));
 
   const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays');
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays +costPrice');
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
   for (const item of items) {
@@ -57,7 +57,9 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
       image: product.images[0],
       size: product.size,
       preorder,
-      ...(preorder && { preorderDays: product.preorderDays })
+      ...(preorder && { preorderDays: product.preorderDays }),
+      // Copied so the profit of this order stays right if the cost changes later
+      ...(product.costPrice != null && { costPrice: product.costPrice })
     };
   });
 

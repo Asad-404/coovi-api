@@ -4,7 +4,7 @@ import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
 import { actor, requireAdmin, requirePermission } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
-import Order, { type IOrder } from '../models/Order';
+import Order, { type IOrder, withoutItemCosts } from '../models/Order';
 import Product from '../models/Product';
 import {
   DELIVERY_AREAS,
@@ -31,7 +31,7 @@ const toPublicOrder = (order: IOrder) => {
   const data: Record<string, unknown> = order.toObject();
   delete data.__v;
   for (const field of PRIVATE_ORDER_FIELDS) delete data[field];
-  return data;
+  return withoutItemCosts(data);
 };
 
 // Guest phone, same rule as checkout. Shared with the lookup so the query can

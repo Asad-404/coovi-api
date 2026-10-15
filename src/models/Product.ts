@@ -15,6 +15,8 @@ export interface IProduct extends Document {
   inStock: boolean;
   allowPreorder: boolean;
   preorderDays: number;
+  // What the shop paid for one piece. Admin-only: never sent by the public routes
+  costPrice?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -88,6 +90,13 @@ const ProductSchema = new Schema<IProduct>(
       default: 15,
       min: 1,
       max: 90
+    },
+    // Only admins with money access read or set this (GET /api/products/:id/cost).
+    // select: false keeps it out of every query unless asked for with '+costPrice'
+    costPrice: {
+      type: Number,
+      min: 0,
+      select: false
     },
   },
   {
