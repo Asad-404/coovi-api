@@ -46,6 +46,9 @@ const productFields = {
   // Out of stock pre-orders: allowed only when this is on; preorderDays is the promised wait
   allowPreorder: z.boolean(),
   preorderDays: z.number().int().min(1).max(90),
+  // What the shop paid for one piece, for profit on the dashboard. Needs money.view;
+  // on an update, leaving it out keeps the saved cost and null removes it
+  costPrice: z.number().min(0).max(10_000_000).nullable().optional(),
 };
 
 const compareAtPriceRule = {
@@ -79,11 +82,18 @@ const productUpdateSchema = z.strictObject({
 // (The settings category, inStock, allowPreorder and preorderDays are kept instead.)
 const OPTIONAL_FIELDS = ['nameBn', 'description', 'descriptionBn', 'size', 'compareAtPrice'] as const;
 
-// A null compareAtPrice means "remove the discount": strip it before saving
-function withoutNullCompareAtPrice<T extends { compareAtPrice?: number | null }>(data: T) {
-  const { compareAtPrice, ...rest } = data;
+// A null compareAtPrice means "remove the discount": strip it before saving.
+// costPrice is handled separately (see canSetCost and the routes)
+function withoutNullCompareAtPrice<T extends { compareAtPrice?: number | null; costPrice?: number | null }>(data: T) {
+  const { compareAtPrice, costPrice: _costPrice, ...rest } = data;
   return compareAtPrice == null ? rest : { ...rest, compareAtPrice };
 }
+
+const NO_MONEY_ACCESS = 'You do not have access to cost prices. Ask the shop owner.';
+
+// Cost prices are money information: only someone with money.view may send one
+const canSetCost = (req: Request, costPrice: number | null | undefined): boolean =>
+  costPrice === undefined || req.admin?.permissions?.includes('money.view') === true;
 
 // Routes below have NO try/catch: Express 5 automatically forwards any rejected
 // promise (or thrown error) to the global error handler in middleware/errorHandler.ts.
@@ -154,6 +164,17 @@ router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> 
   });
 });
 
+// GET /api/products/:id/cost - The saved cost price, for the admin's product form.
+// Kept out of every other product response (it is select: false on the model)
+router.get('/:id/cost', requireAdmin, requirePermission('money.view'), async (req: Request, res: Response): Promise<void> => {
+  const product = await Product.findById(req.params.id).select('+costPrice').lean();
+  if (!product) {
+    res.status(404).json({ success: false, message: 'Product not found' });
+    return;
+  }
+  res.json({ success: true, data: { costPrice: product.costPrice ?? null } });
+});
+
 // GET /api/products/:slug - Get single product by slug
 router.get('/:slug', readLimiter, async (req: Request, res: Response): Promise<void> => {
   const { slug } = req.params;
@@ -187,8 +208,17 @@ router.post('/', requireAdmin, requirePermission('products.edit'), async (req: R
     return;
   }
 
+  if (!canSetCost(req, parsed.data.costPrice)) {
+    res.status(403).json({ success: false, message: NO_MONEY_ACCESS });
+    return;
+  }
+
   try {
-    const product = new Product(withoutNullCompareAtPrice(parsed.data));
+    const { costPrice } = parsed.data;
+    const product = new Product({
+      ...withoutNullCompareAtPrice(parsed.data),
+      ...(costPrice != null && { costPrice })
+    });
     await product.save();
 
     res.status(201).json({
@@ -223,8 +253,19 @@ router.put('/:id', requireAdmin, requirePermission('products.edit'), async (req:
     return;
   }
 
-  const fields = withoutNullCompareAtPrice(parsed.data);
-  const cleared = OPTIONAL_FIELDS.filter((field) => (fields as Record<string, unknown>)[field] === undefined);
+  const { costPrice } = parsed.data;
+  if (!canSetCost(req, costPrice)) {
+    res.status(403).json({ success: false, message: NO_MONEY_ACCESS });
+    return;
+  }
+
+  const fields = {
+    ...withoutNullCompareAtPrice(parsed.data),
+    ...(costPrice != null && { costPrice })
+  };
+  const cleared: string[] = OPTIONAL_FIELDS.filter((field) => (fields as Record<string, unknown>)[field] === undefined);
+  // Left out keeps the saved cost; null removes it
+  if (costPrice === null) cleared.push('costPrice');
   const product = await Product.findByIdAndUpdate(
     id,
     cleared.length
