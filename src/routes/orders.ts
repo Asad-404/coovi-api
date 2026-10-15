@@ -26,7 +26,7 @@ const router = Router();
 // Admin-only fields. Every response a customer can see (placing an order,
 // public tracking) leaves these out; the admin routes return everything.
 // createdBy is the email an admin signs in with, so a customer must never see it.
-export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked', 'createdBy'] as const;
+export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked', 'createdBy', 'callConfirmed'] as const;
 const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`)].join(' ');
 
 const toPublicOrder = (order: IOrder) => {
@@ -63,6 +63,14 @@ const orderBodySchema = z.object({
     .max(50)
 });
 
+// Checkout can't prove the phone belongs to the person ordering, so every website
+// order is confirmed by a call before it ships. This stops one number piling up
+// unconfirmed orders (someone else's number, or a prank) until the shop calls.
+// Off in tests by default like the rate limiters (most test files place many orders
+// from one phone); tests/callConfirm.test.ts switches it on.
+export const MAX_PENDING_PER_PHONE = 3;
+export const pendingPerPhoneCheck = { enabled: process.env.NODE_ENV !== 'test' };
+
 // POST /api/orders - Create new order
 router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void> => {
   const parsed = orderBodySchema.safeParse(req.body);
@@ -77,6 +85,17 @@ router.post('/', orderLimiter, async (req: Request, res: Response): Promise<void
   }
 
   const { customerName, phone, address, district, notes, items } = parsed.data;
+
+  if (
+    pendingPerPhoneCheck.enabled &&
+    (await Order.countDocuments({ phone, status: 'Pending', source: 'website' })) >= MAX_PENDING_PER_PHONE
+  ) {
+    res.status(429).json({
+      success: false,
+      message: `This phone number already has ${MAX_PENDING_PER_PHONE} orders waiting for our confirmation call. Please wait for our call, or contact us to add to an order.`
+    });
+    return;
+  }
 
   const resolved = resolveDeliveryArea(district, parsed.data.deliveryArea);
   if ('error' in resolved) {
@@ -210,6 +229,8 @@ router.post('/manual', requireAdmin, requirePermission('orders.edit'), async (re
     status: 'Pending',
     source,
     createdBy: req.admin?.email,
+    // The admin took this order from the customer directly, so it counts as confirmed
+    callConfirmed: { ...actor(req), at: new Date() },
     statusHistory: [{ to: 'Pending', ...actor(req), at: new Date() }]
   });
 
@@ -693,6 +714,69 @@ router.patch('/:id/status', requireAdmin, requirePermission('orders.edit'), asyn
     success: true,
     data: order,
     message: 'Order status updated successfully'
+  });
+});
+
+const callConfirmedBodySchema = z.strictObject({ confirmed: z.boolean() });
+
+// PATCH /api/orders/:id/call-confirmed - Mark that the customer was called and
+// confirmed the order, or undo it (Admin only - JWT required). Not allowed on
+// Delivered, Cancelled or Returned orders. Each change goes in the edit history.
+router.patch('/:id/call-confirmed', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
+  const parsed = callConfirmedBodySchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    res.status(400).json({ success: false, message: 'Send confirmed: true or false' });
+    return;
+  }
+
+  const { confirmed } = parsed.data;
+  const current = await Order.findById(req.params.id).select('status callConfirmed').lean();
+  if (!current) {
+    res.status(404).json({ success: false, message: 'Order not found' });
+    return;
+  }
+  if (FINAL_STATUSES.includes(current.status)) {
+    res.status(409).json({ success: false, message: 'Delivered, cancelled or returned orders can no longer be edited' });
+    return;
+  }
+
+  const wasConfirmed = Boolean(current.callConfirmed);
+  if (wasConfirmed === confirmed) {
+    const order = await Order.findById(req.params.id).select('-__v');
+    res.json({ success: true, data: order, message: 'Order updated successfully' });
+    return;
+  }
+
+  const who = actor(req);
+  const order = await Order.findOneAndUpdate(
+    // Matching the old value means two admins clicking at once can't both record a change
+    { _id: req.params.id, status: current.status, callConfirmed: { $exists: wasConfirmed } },
+    {
+      ...(confirmed ? { $set: { callConfirmed: { ...who, at: new Date() } } } : { $unset: { callConfirmed: 1 } }),
+      $push: {
+        editHistory: {
+          changes: [{ field: 'callConfirmed', from: wasConfirmed ? 'yes' : 'no', to: confirmed ? 'yes' : 'no' }],
+          ...who,
+          at: new Date()
+        }
+      }
+    },
+    { returnDocument: 'after', runValidators: true }
+  ).select('-__v');
+
+  if (!order) {
+    res.status(409).json({
+      success: false,
+      message: 'This order was just changed by someone else — reload and try again'
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    data: order,
+    message: confirmed ? 'Marked as confirmed by call' : 'Call confirmation removed'
   });
 });
 

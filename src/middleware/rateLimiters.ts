@@ -86,11 +86,12 @@ export const loginLimiter: RateLimitRequestHandler = rateLimit({
   handler: tooManyRequests('Too many login attempts, please try again in 15 minutes'),
 });
 
-// Order creation: one basket-checkout per ~3 minutes is plenty for a human;
-// bots flooding fake COD orders is a real problem for a small shop
+// Order creation: 5 checkouts an hour from one address is plenty for a human;
+// bots flooding fake COD orders is a real problem for a small shop. Each phone
+// is also held to MAX_PENDING_PER_PHONE unconfirmed orders (routes/orders.ts).
 export const orderLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 60 * 60 * 1000,
-  limit: 20,
+  limit: 5,
   skip: isTest,
   standardHeaders: 'draft-7',
   handler: tooManyRequests('Too many orders from this address, please try again later'),
