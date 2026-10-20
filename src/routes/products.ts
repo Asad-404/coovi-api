@@ -40,6 +40,8 @@ const productFields = {
   compareAtPrice: z.number().int().min(0).nullable().optional(),
   // https only: z.url() alone would also accept javascript: and data: addresses
   images: z.array(z.url({ protocol: /^https$/, message: 'must be an https:// address' })).min(1),
+  // Wide 1200x630 picture for social media link previews (the admin checks the size before upload)
+  shareImage: z.url({ protocol: /^https$/, message: 'must be an https:// address' }).optional(),
   size: z.string().max(50).optional(),
   category: z.string().min(1).max(50),
   stock: z.number().int().min(0),
@@ -81,7 +83,7 @@ const productUpdateSchema = z.strictObject({
 // Optional text fields a PUT replaces: leaving one out (or a null compareAtPrice) clears it,
 // so the admin form can empty a field instead of the old value silently staying.
 // (The settings category, inStock, allowPreorder and preorderDays are kept instead.)
-const OPTIONAL_FIELDS = ['nameBn', 'description', 'descriptionBn', 'size', 'compareAtPrice'] as const;
+const OPTIONAL_FIELDS = ['nameBn', 'description', 'descriptionBn', 'shareImage', 'size', 'compareAtPrice'] as const;
 
 // A null compareAtPrice means "remove the discount": strip it before saving.
 // costPrice is handled separately (see canSetCost and the routes)
@@ -304,7 +306,7 @@ router.delete('/:id', requireAdmin, requirePermission('products.delete'), async 
   }
 
   // Best effort: the product is gone even if Cloudinary can't be reached
-  await deleteProductPhotos(product.images);
+  await deleteProductPhotos(product.shareImage ? [...product.images, product.shareImage] : product.images);
 
   res.json({
     success: true,

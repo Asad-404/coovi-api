@@ -76,6 +76,11 @@ describe('deleteProductPhotos', () => {
     expect(destroyedIds()).toEqual(['coovi/products/alone']);
   });
 
+  it('keeps a photo another product uses as its share image', async () => {
+    await Product.create({ slug: 'other', name: 'other', price: 1000, images: [photo('x')], shareImage: photo('wide'), stock: 5 });
+    expect(await deleteProductPhotos([photo('wide')])).toEqual({ deleted: 0, kept: 1, failed: 0 });
+  });
+
   it('does nothing when Cloudinary is not set up', async () => {
     delete process.env.CLOUDINARY_API_SECRET;
     expect(await deleteProductPhotos([photo('a')])).toEqual({ deleted: 0, kept: 0, failed: 0 });
@@ -96,6 +101,13 @@ describe('DELETE /api/products/:id', () => {
     const res = await request(app).delete(`/api/products/${product._id}`).set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(destroyedIds()).toEqual(['coovi/products/one', 'coovi/products/two']);
+  });
+
+  it('deletes the share image too', async () => {
+    const product = await Product.create({ slug: 'gone-wide', name: 'gone-wide', price: 1000, images: [photo('one')], shareImage: photo('wide'), stock: 5 });
+    const res = await request(app).delete(`/api/products/${product._id}`).set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(destroyedIds()).toEqual(['coovi/products/one', 'coovi/products/wide']);
   });
 
   it('still deletes the product when Cloudinary fails', async () => {
