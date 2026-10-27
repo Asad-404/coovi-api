@@ -136,6 +136,33 @@ describe('POST /api/products (body validation)', () => {
   });
 });
 
+describe('share image (social media previews)', () => {
+  it('saves a share image and returns it on the public product', async () => {
+    const token = await getAdminToken();
+    const shareImage = 'https://picsum.photos/seed/share/1200/630';
+    const created = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_PRODUCT, slug: 'share-saree', shareImage });
+    expect(created.status).toBe(201);
+    expect(created.body.data.shareImage).toBe(shareImage);
+
+    const res = await request(app).get('/api/products/share-saree');
+    expect(res.status).toBe(200);
+    expect(res.body.data.shareImage).toBe(shareImage);
+  });
+
+  it('rejects a share image that is not an https address', async () => {
+    const token = await getAdminToken();
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_PRODUCT, slug: 'bad-share-saree', shareImage: 'http://example.com/a.jpg' });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.join(' ')).toMatch(/shareImage/);
+  });
+});
+
 describe('PUT /api/products/:id (body validation)', () => {
   it('rejects an invalid body with 400', async () => {
     const token = await getAdminToken();
@@ -201,6 +228,7 @@ describe('sale pricing (compareAtPrice)', () => {
       nameBn: 'শাড়ি',
       description: 'Old description',
       size: 'Free Size',
+      shareImage: 'https://picsum.photos/seed/share/1200/630',
     });
     const res = await request(app)
       .put(`/api/products/${product._id}`)
@@ -210,6 +238,7 @@ describe('sale pricing (compareAtPrice)', () => {
     expect(res.body.data.nameBn).toBeUndefined();
     expect(res.body.data.description).toBeUndefined();
     expect(res.body.data.size).toBeUndefined();
+    expect(res.body.data.shareImage).toBeUndefined();
   });
 
   it('keeps the sale and pre-order settings when an update leaves them out', async () => {
