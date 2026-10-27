@@ -71,6 +71,21 @@ afterEach(() => {
 });
 
 describe('POST /api/orders/:id/courier/steadfast', () => {
+  it('refuses a viewer without order edit access and never calls Steadfast', async () => {
+    const created = await request(app)
+      .post('/api/admins')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: `viewer-${Date.now()}@coovi.com`, name: 'Viewer', role: 'viewer', password: 'viewer-pass-123' });
+    expect(created.status).toBe(201);
+    const login = await request(app).post('/api/auth/login').send({ email: created.body.data.email, password: 'viewer-pass-123' });
+
+    const res = await request(app)
+      .post(`/api/orders/${orderId}/courier/steadfast`)
+      .set('Authorization', `Bearer ${login.body.data.token}`);
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('returns 401 without a token and never calls Steadfast', async () => {
     const res = await request(app).post(`/api/orders/${orderId}/courier/steadfast`);
     expect(res.status).toBe(401);

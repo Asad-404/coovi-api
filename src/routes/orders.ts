@@ -760,11 +760,11 @@ function sendCourierError(res: Response, error: unknown): void {
   throw error;
 }
 
-// POST /api/orders/:id/courier/steadfast - Book the parcel with Steadfast (Admin only - JWT required)
+// POST /api/orders/:id/courier/steadfast - Book the parcel with Steadfast (orders.edit)
 // Only a confirmed (Processing) order can be booked: its stock is already
 // taken and it hasn't left yet. The cash to collect is the order total the
 // API computed; nothing about the parcel comes from the browser.
-router.post('/:id/courier/steadfast', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.post('/:id/courier/steadfast', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   const now = new Date();
 
@@ -862,7 +862,7 @@ router.post('/:id/courier/steadfast', requireAdmin, async (req: Request, res: Re
 // POST /api/orders/:id/courier/steadfast/refresh - Ask Steadfast where the parcel is (Admin only - JWT required)
 // Saves the courier's status on the order. The order's own status is NOT
 // changed here: the admin still marks it Shipped or Delivered.
-router.post('/:id/courier/steadfast/refresh', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.post('/:id/courier/steadfast/refresh', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const current = await Order.findById(req.params.id).select('courier');
 
   if (!current) {
