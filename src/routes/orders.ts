@@ -2,9 +2,9 @@ import { Router, Request, Response } from 'express';
 import { Types } from 'mongoose';
 import type { QueryFilter } from 'mongoose';
 import { z } from 'zod';
-import { actor, requireAdmin } from '../middleware/auth';
+import { actor, requireAdmin, requirePermission } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
-import Order, { type IOrder } from '../models/Order';
+import Order, { type IOrder, withoutItemCosts } from '../models/Order';
 import Product from '../models/Product';
 import {
   createSteadfastParcel,
@@ -21,6 +21,8 @@ import {
 } from '../services/deliveryFees';
 import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
 import { alertNewOrder } from '../services/notify';
+import { DAY_MS, isDhakaDay, startOfDhakaDay } from '../services/dhakaDays';
+import BlockedPhone from '../models/BlockedPhone';
 
 // Re-exported so tests keep importing it from the route
 export { generateOrderNumber } from '../services/orderPricing';
@@ -38,7 +40,7 @@ const toPublicOrder = (order: IOrder) => {
   const data: Record<string, unknown> = order.toObject();
   delete data.__v;
   for (const field of PRIVATE_ORDER_FIELDS) delete data[field];
-  return data;
+  return withoutItemCosts(data);
 };
 
 // Guest phone, same rule as checkout. Shared with the lookup so the query can
@@ -153,7 +155,7 @@ const manualOrderSchema = z.strictObject({
 
 // POST /api/orders/manual - Enter an order taken outside the website (Admin only - JWT required)
 // Not rate-limited like checkout: the admin is trusted and may enter many orders in a row.
-router.post('/manual', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.post('/manual', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = manualOrderSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -243,8 +245,17 @@ const orderListQuerySchema = z.object({
   page: z.coerce.number().int().catch(1).transform((v) => Math.max(1, v)),
   limit: z.coerce.number().int().catch(20).transform((v) => Math.min(Math.max(1, v), 100)),
   status: z.enum(ORDER_STATUSES).optional().catch(undefined),
-  deliveryArea: z.enum(DELIVERY_AREAS).optional().catch(undefined)
+  deliveryArea: z.enum(DELIVERY_AREAS).optional().catch(undefined),
+  source: z.enum(['website', ...ORDER_SOURCES]).optional().catch(undefined),
+  // Order number, customer name or phone; partial and case-insensitive
+  search: z.string().trim().max(100).catch(''),
+  // Days the order was placed, as YYYY-MM-DD in Bangladesh time, both included
+  from: z.string().refine(isDhakaDay).optional().catch(undefined),
+  to: z.string().refine(isDhakaDay).optional().catch(undefined)
 });
+
+// Turns typed text into a literal pattern, so "(01" can't break or bend the query
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // ?updatedSince=<ISO time> asks only for orders created or changed at or after that time,
 // so the admin can keep its list fresh without downloading every order each minute.
@@ -253,8 +264,8 @@ const orderListQuerySchema = z.object({
 const updatedSinceSchema = z.iso.datetime({ offset: true }).optional();
 
 // GET /api/orders - Get all orders (Admin only - JWT required)
-router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const { page, limit, status, deliveryArea } = orderListQuerySchema.parse(req.query);
+router.get('/', requireAdmin, requirePermission('orders.view'), async (req: Request, res: Response): Promise<void> => {
+  const { page, limit, status, deliveryArea, source, search, from, to } = orderListQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
   // Taken before the query: the client asks "changed since serverTime" next time, so a
   // change landing while this request runs is picked up then instead of being missed
@@ -277,6 +288,20 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
     // Orders from before delivery areas have no field and were charged the inside-Dhaka fee
     query.deliveryArea = deliveryArea === 'inside_dhaka' ? { $in: ['inside_dhaka', null] } : deliveryArea;
   }
+  if (source) {
+    // Orders from before manual entry have no source: they all came from the website
+    query.source = source === 'website' ? { $in: ['website', null] } : source;
+  }
+  if (search) {
+    const pattern = { $regex: escapeRegex(search), $options: 'i' };
+    query.$or = [{ orderNumber: pattern }, { customerName: pattern }, { phone: pattern }];
+  }
+  if (from || to) {
+    query.createdAt = {
+      ...(from && { $gte: startOfDhakaDay(from) }),
+      ...(to && { $lt: new Date(startOfDhakaDay(to).getTime() + DAY_MS) })
+    };
+  }
   if (since.data) {
     query.updatedAt = { $gte: new Date(since.data) };
   }
@@ -290,9 +315,17 @@ router.get('/', requireAdmin, async (req: Request, res: Response): Promise<void>
 
   const total = await Order.countDocuments(query);
 
+  // Orders from a blocked phone are still taken, but carry the block so the admin
+  // shows them in red and someone calls before shipping
+  const blocks = await BlockedPhone.find({ phone: { $in: [...new Set(orders.map((o) => o.phone))] } }).lean();
+  const blockByPhone = new Map(blocks.map((b) => [b.phone, { note: b.note, by: b.by, at: b.createdAt }]));
+
   res.json({
     success: true,
-    data: orders,
+    data: orders.map((order) => {
+      const block = blockByPhone.get(order.phone);
+      return block ? { ...order.toJSON(), blockedPhone: block } : order;
+    }),
     serverTime,
     pagination: {
       page,
@@ -395,7 +428,7 @@ const orderDetailsSchema = z
 const FINAL_STATUSES: OrderStatus[] = ['Delivered', 'Cancelled', 'Returned'];
 
 // PATCH /api/orders/:id - Edit customer/delivery details (Admin only - JWT required)
-router.patch('/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.patch('/:id', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = orderDetailsSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -513,7 +546,7 @@ const statusBodySchema = z.object({
 });
 
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
-router.patch('/:id/status', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.patch('/:id/status', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
   const parsed = statusBodySchema.safeParse(req.body);
 
@@ -674,7 +707,7 @@ const noteBodySchema = z.object({ text: z.string().trim().min(1).max(500) });
 
 // POST /api/orders/:id/notes - Add a private note (Admin only - JWT required).
 // Allowed at any status: a call after delivery about a return still needs writing down.
-router.post('/:id/notes', requireAdmin, async (req: Request, res: Response): Promise<void> => {
+router.post('/:id/notes', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const parsed = noteBodySchema.safeParse(req.body);
 
   if (!parsed.success) {

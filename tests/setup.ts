@@ -20,6 +20,7 @@ await Admin.deleteMany({});
 await Admin.create({
   email: 'testadmin@coovi.com',
   passwordHash: await bcrypt.hash('testpass123', 10),
+  role: 'owner',
 });
 
 afterAll(async () => {

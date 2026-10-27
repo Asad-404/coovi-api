@@ -11,6 +11,9 @@ export interface IOrderItem {
   // true when this line is made or sourced to order: no stock is taken or returned for it
   preorder?: boolean;
   preorderDays?: number;
+  // The product's cost price when the order was placed, so later cost changes don't
+  // rewrite old profit. Missing when no cost was set. Never sent in any response.
+  costPrice?: number;
 }
 
 // The parcel booked with the courier. Filled by the Steadfast booking route;
@@ -126,7 +129,8 @@ const OrderSchema = new Schema<IOrder>(
       image: { type: String, required: true },
       size: { type: String },
       preorder: { type: Boolean, default: false },
-      preorderDays: { type: Number, min: 1 }
+      preorderDays: { type: Number, min: 1 },
+      costPrice: { type: Number, min: 0, select: false }
     }],
     subtotal: {
       type: Number,
@@ -226,9 +230,21 @@ const OrderSchema = new Schema<IOrder>(
     }
   },
   {
-    timestamps: true
+    timestamps: true,
+    // A just-created order still holds its items' cost prices in memory (select: false
+    // only applies to reads), so they are removed from every JSON response here too
+    toJSON: {
+      transform: (_doc, ret: Record<string, unknown>) => withoutItemCosts(ret)
+    }
   }
 );
+
+export function withoutItemCosts<T extends Record<string, unknown>>(order: T): T {
+  if (Array.isArray(order.items)) {
+    for (const item of order.items as Record<string, unknown>[]) delete item.costPrice;
+  }
+  return order;
+}
 
 // Index for order lookup
 OrderSchema.index({ phone: 1 });

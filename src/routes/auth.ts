@@ -2,11 +2,21 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import Admin from '../models/Admin';
+import Admin, { IAdmin } from '../models/Admin';
 import { requireAdmin } from '../middleware/auth';
 import { loginLimiter } from '../middleware/rateLimiters';
+import { effectivePermissions, isCustomized } from '../permissions';
 
 const router = Router();
+
+// Sign a token that expires in 1 day; only this server's JWT_SECRET can create it.
+// tv ties it to the account's tokenVersion, so raising that signs it out.
+const signToken = (admin: IAdmin): string =>
+  jwt.sign(
+    { id: admin._id, email: admin.email, role: admin.role, tv: admin.tokenVersion },
+    process.env.JWT_SECRET || '',
+    { expiresIn: '1d' }
+  );
 
 // Two plain strings: anything else (an object, a number) is a 400 instead of
 // crashing bcrypt with a 500. The max lengths stop huge bodies being hashed.
@@ -51,12 +61,16 @@ router.post('/login', loginLimiter, async (req: Request, res: Response): Promise
     return;
   }
 
-  // Sign a token that expires in 1 day; only this server's JWT_SECRET can create it
-  const token = jwt.sign(
-    { id: admin._id, email: admin.email, role: admin.role },
-    process.env.JWT_SECRET || '',
-    { expiresIn: '1d' }
-  );
+  // Checked only after the password matched, so it doesn't reveal which emails exist
+  if (!admin.active) {
+    res.status(403).json({
+      success: false,
+      message: 'This account is switched off. Ask the shop owner.'
+    });
+    return;
+  }
+
+  const token = signToken(admin);
 
   res.json({
     success: true,
@@ -66,7 +80,8 @@ router.post('/login', loginLimiter, async (req: Request, res: Response): Promise
         id: admin._id,
         email: admin.email,
         name: admin.name,
-        role: admin.role
+        role: admin.role,
+        permissions: effectivePermissions(admin.role, admin.permissions)
       }
     },
     message: 'Login successful'
@@ -75,7 +90,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response): Promise
 
 // GET /api/auth/me - Return the current admin (from the Bearer token)
 router.get('/me', requireAdmin, async (req: Request, res: Response): Promise<void> => {
-  const admin = await Admin.findById(req.admin?.id).select('-passwordHash');
+  const admin = await Admin.findById(req.admin?.id).select('-passwordHash -tokenVersion').lean();
 
   if (!admin) {
     res.status(404).json({
@@ -85,9 +100,15 @@ router.get('/me', requireAdmin, async (req: Request, res: Response): Promise<voi
     return;
   }
 
+  // permissions is what this person can actually do (everything for owners);
+  // the admin panel shows and hides pages from it
   res.json({
     success: true,
-    data: admin
+    data: {
+      ...admin,
+      permissions: effectivePermissions(admin.role, admin.permissions),
+      customized: isCustomized(admin.role, admin.permissions)
+    }
   });
 });
 
@@ -130,10 +151,17 @@ router.patch('/password', requireAdmin, loginLimiter, async (req: Request, res: 
     return;
   }
 
+  // Raising tokenVersion signs this account out everywhere (a lost laptop, an old
+  // session); this device gets a fresh token back so it stays signed in
   admin.passwordHash = await bcrypt.hash(newPassword, 10);
+  admin.tokenVersion += 1;
   await admin.save();
 
-  res.json({ success: true, message: 'Password changed successfully' });
+  res.json({
+    success: true,
+    data: { token: signToken(admin) },
+    message: 'Password changed successfully. Every other sign-in has been signed out.'
+  });
 });
 
 export default router;
