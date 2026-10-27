@@ -55,7 +55,7 @@ export async function deleteProductPhotos(images: string[]): Promise<PhotoCleanu
 
     try {
       const [otherProduct, order] = await Promise.all([
-        Product.exists({ images: url }),
+        Product.exists({ $or: [{ images: url }, { shareImage: url }] }),
         Order.exists({ 'items.image': url })
       ]);
       if (otherProduct || order) {

@@ -9,6 +9,8 @@ export interface IProduct extends Document {
   price: number;
   compareAtPrice?: number;
   images: string[];
+  // 1200x630 picture for link previews on Facebook, Messenger and WhatsApp
+  shareImage?: string;
   size?: string;
   category: string;
   stock: number;
@@ -60,6 +62,12 @@ const ProductSchema = new Schema<IProduct>(
       type: String,
       required: true
     }],
+    // Optional wide picture (1200x630) shown when a product link is shared on social media.
+    // Without it the storefront uses the first photo
+    shareImage: {
+      type: String,
+      trim: true
+    },
     size: {
       type: String,
       trim: true

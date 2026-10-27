@@ -16,6 +16,19 @@ export interface IOrderItem {
   costPrice?: number;
 }
 
+// The parcel booked with the courier. Filled by the Steadfast booking route;
+// bookingStartedAt is a short lock so two clicks can't book the same order twice.
+export interface IOrderCourier {
+  name?: 'Steadfast';
+  consignmentId?: number;
+  trackingCode?: string;
+  // The courier's own delivery status, e.g. in_review, pending, hold, delivered, cancelled
+  status?: string;
+  bookedAt?: Date;
+  statusCheckedAt?: Date;
+  bookingStartedAt?: Date;
+}
+
 // "by" is the admin's email, or 'customer' for the order being placed.
 // byId is the admin's id, kept so a later email change can't hide who it was.
 export interface IOrderNote {
@@ -65,6 +78,7 @@ export interface IOrder extends Document {
   status: 'Pending' | 'Processing' | 'Shipped' | 'Delivered' | 'Cancelled' | 'Returned';
   paymentMethod: string;
   notes?: string;
+  courier?: IOrderCourier;
   // Why the order was cancelled or the parcel came back (set on Cancelled and Returned)
   cancelReason?: string;
   returnedAt?: Date;
@@ -162,6 +176,21 @@ const OrderSchema = new Schema<IOrder>(
     notes: {
       type: String,
       trim: true
+    },
+    courier: {
+      type: new Schema<IOrderCourier>(
+        {
+          name: { type: String, enum: ['Steadfast'] },
+          consignmentId: { type: Number },
+          trackingCode: { type: String },
+          status: { type: String },
+          bookedAt: { type: Date },
+          statusCheckedAt: { type: Date },
+          bookingStartedAt: { type: Date }
+        },
+        { _id: false }
+      ),
+      default: undefined
     },
     cancelReason: { type: String, trim: true, maxlength: 300 },
     returnedAt: { type: Date },
