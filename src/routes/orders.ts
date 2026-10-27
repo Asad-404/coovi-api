@@ -7,6 +7,12 @@ import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rat
 import Order, { type IOrder, withoutItemCosts } from '../models/Order';
 import Product from '../models/Product';
 import {
+  createSteadfastParcel,
+  getSteadfastStatus,
+  SteadfastError,
+  SteadfastNotConfiguredError
+} from '../services/steadfast';
+import {
   DELIVERY_AREAS,
   DISTRICTS,
   getDeliveryFee,
@@ -27,7 +33,8 @@ const router = Router();
 // public tracking) leaves these out; the admin routes return everything.
 // createdBy is the email an admin signs in with, so a customer must never see it.
 export const PRIVATE_ORDER_FIELDS = ['internalNotes', 'statusHistory', 'editHistory', 'cancelReason', 'restocked', 'createdBy'] as const;
-const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`)].join(' ');
+// courier.bookingStartedAt is the Steadfast booking lock, internal only
+const PUBLIC_ORDER_SELECT = ['-__v', ...PRIVATE_ORDER_FIELDS.map((f) => `-${f}`), '-courier.bookingStartedAt'].join(' ');
 
 const toPublicOrder = (order: IOrder) => {
   const data: Record<string, unknown> = order.toObject();
@@ -729,6 +736,164 @@ router.post('/:id/notes', requireAdmin, requirePermission('orders.edit'), async 
     success: true,
     data: order,
     message: 'Note added'
+  });
+});
+
+// Steadfast limits the delivery address to 250 characters; ours allows 500
+const STEADFAST_ADDRESS_MAX = 250;
+
+// A booking that started this long ago and never finished (server restart
+// mid-call) no longer blocks a retry. Steadfast itself refuses a second parcel
+// with the same invoice, so a retry can't create a duplicate.
+const BOOKING_LOCK_MS = 60_000;
+
+// Turns a Steadfast problem into the right answer for the admin
+function sendCourierError(res: Response, error: unknown): void {
+  if (error instanceof SteadfastNotConfiguredError) {
+    res.status(503).json({ success: false, message: error.message });
+    return;
+  }
+  if (error instanceof SteadfastError) {
+    res.status(502).json({ success: false, message: error.message });
+    return;
+  }
+  throw error;
+}
+
+// POST /api/orders/:id/courier/steadfast - Book the parcel with Steadfast (orders.edit)
+// Only a confirmed (Processing) order can be booked: its stock is already
+// taken and it hasn't left yet. The cash to collect is the order total the
+// API computed; nothing about the parcel comes from the browser.
+router.post('/:id/courier/steadfast', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
+  const { id } = req.params;
+  const now = new Date();
+
+  // Claim the booking atomically so two clicks (or two admins) can't book twice
+  const claimed = await Order.findOneAndUpdate(
+    {
+      _id: id,
+      status: 'Processing',
+      'courier.trackingCode': { $exists: false },
+      $or: [
+        { 'courier.bookingStartedAt': { $exists: false } },
+        { 'courier.bookingStartedAt': { $lt: new Date(now.getTime() - BOOKING_LOCK_MS) } }
+      ]
+    },
+    { $set: { 'courier.bookingStartedAt': now } },
+    { returnDocument: 'after' }
+  );
+
+  if (!claimed) {
+    const order = await Order.findById(id).select('status courier');
+    if (!order) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+    res.status(409).json({
+      success: false,
+      message: order.courier?.trackingCode
+        ? `Already booked with Steadfast (tracking code ${order.courier.trackingCode})`
+        : order.status !== 'Processing'
+          ? `Only Processing orders can be booked with the courier (this order is ${order.status})`
+          : 'This order is being booked right now — reload in a minute'
+    });
+    return;
+  }
+
+  const releaseClaim = () =>
+    Order.updateOne({ _id: id, 'courier.trackingCode': { $exists: false } }, { $unset: { courier: 1 } });
+
+  // The courier sorts parcels by district, so add it when the address doesn't already name it
+  const district = claimed.district;
+  const recipientAddress =
+    district && !claimed.address.toLowerCase().includes(district.toLowerCase())
+      ? `${claimed.address}, ${district}`
+      : claimed.address;
+
+  if (recipientAddress.length > STEADFAST_ADDRESS_MAX) {
+    await releaseClaim();
+    res.status(400).json({
+      success: false,
+      message: `Steadfast accepts addresses up to ${STEADFAST_ADDRESS_MAX} characters; this one has ${recipientAddress.length}${recipientAddress === claimed.address ? '' : ' with the district added'}. Shorten it with Edit first.`
+    });
+    return;
+  }
+
+  let booking;
+  try {
+    booking = await createSteadfastParcel({
+      invoice: claimed.orderNumber,
+      recipientName: claimed.customerName,
+      recipientPhone: claimed.phone,
+      recipientAddress,
+      codAmount: claimed.total,
+      note: claimed.notes
+    });
+  } catch (error) {
+    await releaseClaim();
+    sendCourierError(res, error);
+    return;
+  }
+
+  const order = await Order.findByIdAndUpdate(
+    id,
+    {
+      $set: {
+        courier: {
+          name: 'Steadfast',
+          consignmentId: booking.consignmentId,
+          trackingCode: booking.trackingCode,
+          status: booking.status,
+          bookedAt: new Date(),
+          statusCheckedAt: new Date()
+        }
+      }
+    },
+    { returnDocument: 'after' }
+  ).select('-__v');
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    message: `Booked with Steadfast, tracking code ${booking.trackingCode}`
+  });
+});
+
+// POST /api/orders/:id/courier/steadfast/refresh - Ask Steadfast where the parcel is (Admin only - JWT required)
+// Saves the courier's status on the order. The order's own status is NOT
+// changed here: the admin still marks it Shipped or Delivered.
+router.post('/:id/courier/steadfast/refresh', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
+  const current = await Order.findById(req.params.id).select('courier');
+
+  if (!current) {
+    res.status(404).json({ success: false, message: 'Order not found' });
+    return;
+  }
+
+  const consignmentId = current.courier?.consignmentId;
+  if (!consignmentId) {
+    res.status(409).json({ success: false, message: 'This order has not been booked with Steadfast' });
+    return;
+  }
+
+  let status: string;
+  try {
+    status = await getSteadfastStatus(consignmentId);
+  } catch (error) {
+    sendCourierError(res, error);
+    return;
+  }
+
+  const order = await Order.findByIdAndUpdate(
+    req.params.id,
+    { $set: { 'courier.status': status, 'courier.statusCheckedAt': new Date() } },
+    { returnDocument: 'after' }
+  ).select('-__v');
+
+  res.json({
+    success: true,
+    data: order,
+    message: `Steadfast status: ${status}`
   });
 });
 
