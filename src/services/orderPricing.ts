@@ -68,26 +68,32 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
 }
 
 // Order number + phone are a guest's only credentials for viewing an order, so
-// the random part must be unguessable: 6 characters from a 30-letter alphabet
-// (no look-alikes 0/O, 1/I/L, and no U) is ~729 million per day, drawn with a
-// cryptographic RNG. The date is the shop's day in Bangladesh (UTC+6), not UTC.
+// the number must be unguessable: 6 characters from a 30-letter alphabet (no
+// look-alikes 0/O, 1/I/L, and no U) is ~729 million, drawn with a cryptographic RNG.
 const ORDER_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
 const ORDER_CODE_LENGTH = 6;
 
-export const generateOrderNumber = (now: Date = new Date()): string => {
-  const date = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Dhaka',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  })
-    .format(now)
-    .replace(/-/g, '');
+export const SHORT_ORDER_NUMBER = /^[2-9A-HJKMNP-TV-Z]{6}$/;
+// Until 2026-10-31 numbers were ORD-YYYYMMDD-XXXXXX. Customers still hold those,
+// and the short number is their last 6 characters.
+const LONG_ORDER_NUMBER = /^ORD-\d{8}-([2-9A-HJKMNP-TV-Z]{6})$/;
+
+export const shortCodeFromLongNumber = (orderNumber: string): string | null =>
+  LONG_ORDER_NUMBER.exec(orderNumber)?.[1] ?? null;
+
+// The number as typed, plus its short form when it is a long one. The typed
+// number stays in the list so orders not yet renumbered are still found.
+export const orderNumberCandidates = (orderNumber: string): string[] => {
+  const code = shortCodeFromLongNumber(orderNumber);
+  return code ? [orderNumber, code] : [orderNumber];
+};
+
+export const generateOrderNumber = (): string => {
   let code = '';
   for (let i = 0; i < ORDER_CODE_LENGTH; i++) {
     code += ORDER_CODE_ALPHABET[randomInt(ORDER_CODE_ALPHABET.length)];
   }
-  return `ORD-${date}-${code}`;
+  return code;
 };
 
 type NewOrderFields = Omit<Partial<IOrder>, 'orderNumber'>;

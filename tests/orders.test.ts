@@ -231,6 +231,34 @@ describe('GET /api/orders/:orderNumber (phone-match lookup — CC-2)', () => {
     expect(res.body.data.customerName).toBe('Test Customer');
   });
 
+  it('finds a renumbered order by the long number the customer still holds', async () => {
+    const res = await request(app)
+      .get(`/api/orders/ORD-20261013-${orderNumber}`)
+      .query({ phone: '01712345678' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.orderNumber).toBe(orderNumber);
+  });
+
+  it('still needs the right phone with a long number', async () => {
+    const res = await request(app)
+      .get(`/api/orders/ORD-20261013-${orderNumber}`)
+      .query({ phone: '01999999999' });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('finds an order not yet renumbered by its long number', async () => {
+    await Order.collection.insertOne({ orderNumber: 'ORD-20261012-ABCDEF', phone: '01712345678' });
+
+    const res = await request(app)
+      .get('/api/orders/ORD-20261012-ABCDEF')
+      .query({ phone: '01712345678' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.orderNumber).toBe('ORD-20261012-ABCDEF');
+  });
+
   it('returns 400 when no phone is provided', async () => {
     const res = await request(app).get(`/api/orders/${orderNumber}`);
 
@@ -312,13 +340,7 @@ describe('generateOrderNumber', () => {
 
     expect(numbers.size).toBe(200);
     for (const n of numbers) {
-      expect(n).toMatch(/^ORD-\d{8}-[2-9A-HJKMNP-TV-Z]{6}$/);
+      expect(n).toMatch(/^[2-9A-HJKMNP-TV-Z]{6}$/);
     }
-  });
-
-  it("dates the order by the shop's day in Bangladesh, not UTC", () => {
-    // 20:30 UTC on 12 Oct is 02:30 on 13 Oct in Dhaka
-    expect(generateOrderNumber(new Date('2026-10-12T20:30:00Z'))).toMatch(/^ORD-20261013-/);
-    expect(generateOrderNumber(new Date('2026-10-12T17:59:00Z'))).toMatch(/^ORD-20261012-/);
   });
 });

@@ -19,7 +19,7 @@ import {
   getDeliveryFees,
   resolveDeliveryArea
 } from '../services/deliveryFees';
-import { buildOrderItems, createOrderWithNumber } from '../services/orderPricing';
+import { buildOrderItems, createOrderWithNumber, orderNumberCandidates } from '../services/orderPricing';
 import { alertNewOrder } from '../services/notify';
 import { DAY_MS, isDhakaDay, startOfDhakaDay } from '../services/dhakaDays';
 import BlockedPhone from '../models/BlockedPhone';
@@ -399,7 +399,10 @@ router.get('/:orderNumber', orderLookupLimiter, async (req: Request, res: Respon
     return;
   }
 
-  const order = await Order.findOne({ orderNumber, phone: phone.data }).select(PUBLIC_ORDER_SELECT);
+  const order = await Order.findOne({
+    orderNumber: { $in: orderNumberCandidates(String(orderNumber)) },
+    phone: phone.data
+  }).select(PUBLIC_ORDER_SELECT);
 
   if (!order) {
     res.status(404).json({
