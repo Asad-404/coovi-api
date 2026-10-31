@@ -312,13 +312,7 @@ describe('generateOrderNumber', () => {
 
     expect(numbers.size).toBe(200);
     for (const n of numbers) {
-      expect(n).toMatch(/^ORD-\d{8}-[2-9A-HJKMNP-TV-Z]{6}$/);
+      expect(n).toMatch(/^[2-9A-HJKMNP-TV-Z]{6}$/);
     }
-  });
-
-  it("dates the order by the shop's day in Bangladesh, not UTC", () => {
-    // 20:30 UTC on 12 Oct is 02:30 on 13 Oct in Dhaka
-    expect(generateOrderNumber(new Date('2026-10-12T20:30:00Z'))).toMatch(/^ORD-20261013-/);
-    expect(generateOrderNumber(new Date('2026-10-12T17:59:00Z'))).toMatch(/^ORD-20261012-/);
   });
 });

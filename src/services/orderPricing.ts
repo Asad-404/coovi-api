@@ -68,26 +68,17 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
 }
 
 // Order number + phone are a guest's only credentials for viewing an order, so
-// the random part must be unguessable: 6 characters from a 30-letter alphabet
-// (no look-alikes 0/O, 1/I/L, and no U) is ~729 million per day, drawn with a
-// cryptographic RNG. The date is the shop's day in Bangladesh (UTC+6), not UTC.
+// the number must be unguessable: 6 characters from a 30-letter alphabet (no
+// look-alikes 0/O, 1/I/L, and no U) is ~729 million, drawn with a cryptographic RNG.
 const ORDER_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
 const ORDER_CODE_LENGTH = 6;
 
-export const generateOrderNumber = (now: Date = new Date()): string => {
-  const date = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Dhaka',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  })
-    .format(now)
-    .replace(/-/g, '');
+export const generateOrderNumber = (): string => {
   let code = '';
   for (let i = 0; i < ORDER_CODE_LENGTH; i++) {
     code += ORDER_CODE_ALPHABET[randomInt(ORDER_CODE_ALPHABET.length)];
   }
-  return `ORD-${date}-${code}`;
+  return code;
 };
 
 type NewOrderFields = Omit<Partial<IOrder>, 'orderNumber'>;

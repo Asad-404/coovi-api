@@ -76,7 +76,7 @@ describe('POST /api/orders/manual', () => {
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     const order = res.body.data;
-    expect(order.orderNumber).toMatch(/^ORD-\d{8}-[2-9A-HJKMNP-TV-Z]{6}$/);
+    expect(order.orderNumber).toMatch(/^[2-9A-HJKMNP-TV-Z]{6}$/);
     expect(order.status).toBe('Pending');
     expect(order.source).toBe('facebook');
     expect(order.createdBy).toBe(TEST_ADMIN.email);
