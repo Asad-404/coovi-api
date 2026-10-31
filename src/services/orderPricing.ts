@@ -73,21 +73,6 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
 const ORDER_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
 const ORDER_CODE_LENGTH = 6;
 
-export const SHORT_ORDER_NUMBER = /^[2-9A-HJKMNP-TV-Z]{6}$/;
-// Until 2026-10-31 numbers were ORD-YYYYMMDD-XXXXXX. Customers still hold those,
-// and the short number is their last 6 characters.
-const LONG_ORDER_NUMBER = /^ORD-\d{8}-([2-9A-HJKMNP-TV-Z]{6})$/;
-
-export const shortCodeFromLongNumber = (orderNumber: string): string | null =>
-  LONG_ORDER_NUMBER.exec(orderNumber)?.[1] ?? null;
-
-// The number as typed, plus its short form when it is a long one. The typed
-// number stays in the list so orders not yet renumbered are still found.
-export const orderNumberCandidates = (orderNumber: string): string[] => {
-  const code = shortCodeFromLongNumber(orderNumber);
-  return code ? [orderNumber, code] : [orderNumber];
-};
-
 export const generateOrderNumber = (): string => {
   let code = '';
   for (let i = 0; i < ORDER_CODE_LENGTH; i++) {
