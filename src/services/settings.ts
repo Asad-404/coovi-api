@@ -26,7 +26,7 @@ export async function getSettings(): Promise<ShopSettings> {
   const doc = await Settings.findOneAndUpdate(
     { key: 'shop' },
     { $setOnInsert: SETTINGS_DEFAULTS },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   const value = toPlain(doc);
@@ -38,7 +38,7 @@ export async function getSettings(): Promise<ShopSettings> {
 export async function updateSettings(changes: Partial<typeof SETTINGS_DEFAULTS>): Promise<ShopSettings> {
   // Make sure the document exists (with defaults) before applying a partial change
   await getSettings();
-  const doc = await Settings.findOneAndUpdate({ key: 'shop' }, { $set: changes }, { new: true });
+  const doc = await Settings.findOneAndUpdate({ key: 'shop' }, { $set: changes }, { returnDocument: 'after' });
   cached = null;
   return toPlain(doc!);
 }
