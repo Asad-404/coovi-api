@@ -25,7 +25,7 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
   const items = [...quantities].map(([productId, quantity]) => ({ productId, quantity }));
 
   const productIds = items.map((item) => item.productId);
-  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock images size allowPreorder preorderDays +costPrice');
+  const products = await Product.find({ _id: { $in: productIds } }).select('name price stock inStock published images size allowPreorder preorderDays +costPrice');
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
   for (const item of items) {
@@ -35,8 +35,9 @@ export async function buildOrderItems(requested: RequestedItem[]): Promise<Build
       return { ok: false, message: `Item is no longer available (product ${item.productId})` };
     }
 
-    // The admin's "Available for sale" switch (inStock) takes a product off sale even while units remain
-    if (!product.inStock) {
+    // The admin's "Available for sale" switch (inStock) takes a product off sale even while units remain.
+    // A draft can't be sold either, for example from a cart filled before it was unpublished
+    if (!product.inStock || !product.published) {
       return { ok: false, message: `"${product.name}" is currently unavailable` };
     }
 

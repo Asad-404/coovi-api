@@ -17,6 +17,8 @@ export interface IProduct extends Document {
   inStock: boolean;
   allowPreorder: boolean;
   preorderDays: number;
+  // false = a draft: hidden from the shop and refused at checkout
+  published: boolean;
   // What the shop paid for one piece. Admin-only: never sent by the public routes
   costPrice?: number;
   createdAt: Date;
@@ -98,6 +100,11 @@ const ProductSchema = new Schema<IProduct>(
       default: 15,
       min: 1,
       max: 90
+    },
+    // Products saved before this field existed count as published
+    published: {
+      type: Boolean,
+      default: true
     },
     // Only admins with money access read or set this (GET /api/products/:id/cost).
     // select: false keeps it out of every query unless asked for with '+costPrice'

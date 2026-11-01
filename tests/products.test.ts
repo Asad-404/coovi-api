@@ -309,3 +309,108 @@ describe('sale pricing (compareAtPrice)', () => {
     expect(res.body.data.subtotal).toBe(2400);
   });
 });
+
+describe('publishing products', () => {
+  const auth = async () => ({ Authorization: `Bearer ${await getAdminToken()}` });
+
+  it('hides a draft from the public list and product page, but not from the admin', async () => {
+    await Product.deleteMany({});
+    await Product.create({ ...VALID_PRODUCT, slug: 'live-saree' });
+    const created = await request(app)
+      .post('/api/products')
+      .set(await auth())
+      .send({ ...VALID_PRODUCT, slug: 'draft-saree', published: false });
+    expect(created.status).toBe(201);
+    expect(created.body.data.published).toBe(false);
+
+    const list = await request(app).get('/api/products');
+    expect(list.body.data.map((p: { slug: string }) => p.slug)).toEqual(['live-saree']);
+    expect(list.body.pagination.total).toBe(1);
+    expect((await request(app).get('/api/products/draft-saree')).status).toBe(404);
+
+    const managed = await request(app).get('/api/products/manage').set(await auth());
+    expect(managed.status).toBe(200);
+    expect(managed.body.data.map((p: { slug: string }) => p.slug).sort()).toEqual(['draft-saree', 'live-saree']);
+    expect(managed.body.pagination.total).toBe(2);
+
+    const one = await request(app).get('/api/products/manage/draft-saree').set(await auth());
+    expect(one.status).toBe(200);
+    expect(one.body.data.published).toBe(false);
+  });
+
+  it('keeps the admin routes behind a sign-in', async () => {
+    expect((await request(app).get('/api/products/manage')).status).toBe(401);
+    expect((await request(app).get('/api/products/manage/draft-saree')).status).toBe(401);
+  });
+
+  it('answers 404 on the admin route for an unknown slug', async () => {
+    const res = await request(app).get('/api/products/manage/no-such-saree').set(await auth());
+    expect(res.status).toBe(404);
+  });
+
+  it('publishes and unpublishes a product, and keeps the state when an update leaves it out', async () => {
+    const product = await Product.create({ ...VALID_PRODUCT, slug: 'toggle-saree', published: false });
+    const put = async (body: object) =>
+      request(app).put(`/api/products/${product._id}`).set(await auth()).send({ ...VALID_PRODUCT, slug: 'toggle-saree', ...body });
+
+    expect((await put({})).body.data.published).toBe(false);
+
+    expect((await put({ published: true })).body.data.published).toBe(true);
+    expect((await request(app).get('/api/products/toggle-saree')).status).toBe(200);
+
+    expect((await put({ published: false })).body.data.published).toBe(false);
+    expect((await request(app).get('/api/products/toggle-saree')).status).toBe(404);
+  });
+
+  it('publishes a new product when the request does not say', async () => {
+    const res = await request(app)
+      .post('/api/products')
+      .set(await auth())
+      .send({ ...VALID_PRODUCT, slug: 'default-published-saree' });
+    expect(res.body.data.published).toBe(true);
+  });
+
+  it('keeps products saved before the field existed on the shop', async () => {
+    await Product.collection.insertOne({ ...VALID_PRODUCT, slug: 'old-saree' });
+    const res = await request(app).get('/api/products/old-saree');
+    expect(res.status).toBe(200);
+    expect(res.body.data.published).toBe(true);
+    const list = await request(app).get('/api/products?search=Test&limit=50');
+    expect(list.body.data.map((p: { slug: string }) => p.slug)).toContain('old-saree');
+  });
+
+  it('refuses to order a draft', async () => {
+    const draft = await Product.create({ ...VALID_PRODUCT, slug: 'unorderable-saree', published: false });
+    const res = await request(app)
+      .post('/api/orders')
+      .send({
+        customerName: 'Draft Buyer',
+        phone: '01712345679',
+        address: 'House 1, Road 2, Dhaka',
+        items: [{ productId: String(draft._id), quantity: 1 }],
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('currently unavailable');
+  });
+
+  it('still takes an order for a product saved before the field existed', async () => {
+    const { insertedId } = await Product.collection.insertOne({ ...VALID_PRODUCT, slug: 'old-orderable-saree' });
+    const res = await request(app)
+      .post('/api/orders')
+      .send({
+        customerName: 'Old Buyer',
+        phone: '01712345680',
+        address: 'House 1, Road 2, Dhaka',
+        items: [{ productId: String(insertedId), quantity: 1 }],
+      });
+    expect(res.status).toBe(201);
+  });
+
+  it('refuses the reserved web address "manage"', async () => {
+    const res = await request(app)
+      .post('/api/products')
+      .set(await auth())
+      .send({ ...VALID_PRODUCT, slug: 'manage' });
+    expect(res.status).toBe(400);
+  });
+});
