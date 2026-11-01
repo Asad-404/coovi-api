@@ -160,7 +160,12 @@ describe('Pre-order fields on products', () => {
         slug: 'preorder-defaults',
         name: 'Defaults Saree',
         price: 900,
-        images: ['https://picsum.photos/seed/defaults/800/1200'],
+        images: [
+          'https://picsum.photos/seed/defaults/800/1200',
+          'https://picsum.photos/seed/defaults2/800/1200',
+          'https://picsum.photos/seed/defaults3/800/1200',
+        ],
+        shareImage: 'https://picsum.photos/seed/defaults-share/1200/630',
         stock: 0
       });
 
@@ -178,7 +183,12 @@ describe('Pre-order fields on products', () => {
         slug: 'preorder-too-long',
         name: 'Too Long Saree',
         price: 900,
-        images: ['https://picsum.photos/seed/long/800/1200'],
+        images: [
+          'https://picsum.photos/seed/long/800/1200',
+          'https://picsum.photos/seed/long2/800/1200',
+          'https://picsum.photos/seed/long3/800/1200',
+        ],
+        shareImage: 'https://picsum.photos/seed/long-share/1200/630',
         stock: 0,
         allowPreorder: true,
         preorderDays: 120

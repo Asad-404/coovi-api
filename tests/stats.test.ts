@@ -26,7 +26,12 @@ const productBody = (slug: string, extra: Record<string, unknown> = {}) => ({
   slug,
   name: slug,
   price: 1000,
-  images: ['https://picsum.photos/seed/stats/800/1200'],
+  images: [
+    'https://picsum.photos/seed/stats/800/1200',
+    'https://picsum.photos/seed/stats2/800/1200',
+    'https://picsum.photos/seed/stats3/800/1200',
+  ],
+  shareImage: 'https://picsum.photos/seed/stats-share/1200/630',
   stock: 50,
   ...extra
 });

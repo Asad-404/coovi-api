@@ -104,6 +104,16 @@ const NO_MONEY_ACCESS = 'You do not have access to cost prices. Ask the shop own
 const canSetCost = (req: Request, costPrice: number | null | undefined): boolean =>
   costPrice === undefined || req.admin?.permissions?.includes('money.view') === true;
 
+// What a product needs before customers can see it. The photos' shape is checked by the
+// admin, which opens them in the browser: the API only ever sees their addresses
+const MIN_PUBLISHED_PHOTOS = 3;
+const publishProblem = (product: { images: string[]; shareImage?: string }): string | null => {
+  if (new Set(product.images).size < MIN_PUBLISHED_PHOTOS) {
+    return `Add at least ${MIN_PUBLISHED_PHOTOS} different photos before publishing`;
+  }
+  return product.shareImage ? null : 'Add a share image before publishing';
+};
+
 // Routes below have NO try/catch: Express 5 automatically forwards any rejected
 // promise (or thrown error) to the global error handler in middleware/errorHandler.ts.
 // Route code only handles errors it can answer specifically (400/404/11000).
@@ -250,6 +260,12 @@ router.post('/', requireAdmin, requirePermission('products.edit'), async (req: R
     return;
   }
 
+  const problem = parsed.data.published ? publishProblem(parsed.data) : null;
+  if (problem) {
+    res.status(400).json({ success: false, message: problem });
+    return;
+  }
+
   try {
     const { costPrice } = parsed.data;
     const product = new Product({
@@ -293,6 +309,25 @@ router.put('/:id', requireAdmin, requirePermission('products.edit'), async (req:
   const { costPrice } = parsed.data;
   if (!canSetCost(req, costPrice)) {
     res.status(403).json({ success: false, message: NO_MONEY_ACCESS });
+    return;
+  }
+
+  const saved = await Product.findById(id).select('images shareImage published');
+  if (!saved) {
+    res.status(404).json({ success: false, message: 'Product not found' });
+    return;
+  }
+
+  // The rules apply when a product goes live or its pictures change. A product published
+  // before them can still have its price or stock changed without new photos
+  const picturesChanged =
+    parsed.data.images.join('\
+') !== saved.images.join('\
+') || parsed.data.shareImage !== saved.shareImage;
+  const staysOrGoesLive = parsed.data.published ?? saved.published;
+  const problem = staysOrGoesLive && (!saved.published || picturesChanged) ? publishProblem(parsed.data) : null;
+  if (problem) {
+    res.status(400).json({ success: false, message: problem });
     return;
   }
 
