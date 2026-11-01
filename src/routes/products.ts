@@ -29,7 +29,9 @@ const productFields = {
     .string()
     .min(1)
     .max(100)
-    .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'must be lowercase words separated by single hyphens'),
+    .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'must be lowercase words separated by single hyphens')
+    // GET /products/manage would answer instead of the product page
+    .refine((slug) => slug !== 'manage', 'this web address is reserved'),
   name: z.string().min(1).max(120),
   nameBn: z.string().max(120).optional(),
   description: z.string().max(2000).optional(),
@@ -49,6 +51,8 @@ const productFields = {
   // Out of stock pre-orders: allowed only when this is on; preorderDays is the promised wait
   allowPreorder: z.boolean(),
   preorderDays: z.number().int().min(1).max(90),
+  // false = a draft: only the admin can see it and it cannot be ordered
+  published: z.boolean(),
   // What the shop paid for one piece, for profit on the dashboard. Needs money.view;
   // on an update, leaving it out keeps the saved cost and null removes it
   costPrice: z.number().min(0).max(10_000_000).nullable().optional(),
@@ -68,6 +72,7 @@ const productCreateSchema = z.strictObject({
   inStock: productFields.inStock.default(true),
   allowPreorder: productFields.allowPreorder.default(false),
   preorderDays: productFields.preorderDays.default(15),
+  published: productFields.published.default(true),
 }).refine(compareAtPriceIsValid, compareAtPriceRule);
 
 // Update: settings left out KEEP their saved value. A default here would silently put a
@@ -78,11 +83,12 @@ const productUpdateSchema = z.strictObject({
   inStock: productFields.inStock.optional(),
   allowPreorder: productFields.allowPreorder.optional(),
   preorderDays: productFields.preorderDays.optional(),
+  published: productFields.published.optional(),
 }).refine(compareAtPriceIsValid, compareAtPriceRule);
 
 // Optional text fields a PUT replaces: leaving one out (or a null compareAtPrice) clears it,
 // so the admin form can empty a field instead of the old value silently staying.
-// (The settings category, inStock, allowPreorder and preorderDays are kept instead.)
+// (The settings category, inStock, allowPreorder, preorderDays and published are kept instead.)
 const OPTIONAL_FIELDS = ['nameBn', 'description', 'descriptionBn', 'shareImage', 'size', 'compareAtPrice'] as const;
 
 // A null compareAtPrice means "remove the discount": strip it before saving.
@@ -102,8 +108,12 @@ const canSetCost = (req: Request, costPrice: number | null | undefined): boolean
 // promise (or thrown error) to the global error handler in middleware/errorHandler.ts.
 // Route code only handles errors it can answer specifically (400/404/11000).
 
-// GET /api/products - Get all products with pagination, search, and sort
-router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> => {
+// Products saved before drafts existed have no `published` field and stay on the shop,
+// so the public routes test "not false" rather than "true"
+const NOT_A_DRAFT = { published: { $ne: false } };
+
+// Pagination, search and sort for the public list and the admin's list
+async function sendProductList(req: Request, res: Response, onlyPublished: boolean): Promise<void> {
   const { page, limit, search, sort, category, onSale } = listQuerySchema.parse(req.query);
   const skip = (page - 1) * limit;
 
@@ -111,7 +121,8 @@ router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> 
     name?: { $regex: string; $options: string };
     category?: string;
     $expr?: { $gt: string[] };
-  } = {};
+    published?: { $ne: boolean };
+  } = onlyPublished ? { ...NOT_A_DRAFT } : {};
 
   // Search by name (partial match, case-insensitive, regex-safe)
   if (search) {
@@ -165,6 +176,29 @@ router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> 
       hasMore: page * limit < total
     }
   });
+}
+
+// GET /api/products/manage - The admin's list: drafts included.
+// Registered before /:slug, which would otherwise answer with "manage" as the slug
+router.get('/manage', requireAdmin, requirePermission('products.view'), async (req: Request, res: Response): Promise<void> => {
+  await sendProductList(req, res, false);
+});
+
+// GET /api/products/manage/:slug - One product for the admin's form: a draft too
+router.get('/manage/:slug', requireAdmin, requirePermission('products.view'), async (req: Request, res: Response): Promise<void> => {
+  const product = await Product.findOne({ slug: req.params.slug }).select('-__v');
+
+  if (!product) {
+    res.status(404).json({ success: false, message: 'Product not found' });
+    return;
+  }
+
+  res.json({ success: true, data: product });
+});
+
+// GET /api/products - Published products with pagination, search, and sort
+router.get('/', readLimiter, async (req: Request, res: Response): Promise<void> => {
+  await sendProductList(req, res, true);
 });
 
 // GET /api/products/:id/cost - The saved cost price, for the admin's product form.
@@ -178,11 +212,11 @@ router.get('/:id/cost', requireAdmin, requirePermission('money.view'), async (re
   res.json({ success: true, data: { costPrice: product.costPrice ?? null } });
 });
 
-// GET /api/products/:slug - Get single product by slug
+// GET /api/products/:slug - Get single published product by slug
 router.get('/:slug', readLimiter, async (req: Request, res: Response): Promise<void> => {
   const { slug } = req.params;
 
-  const product = await Product.findOne({ slug }).select('-__v');
+  const product = await Product.findOne({ slug, ...NOT_A_DRAFT }).select('-__v');
 
   if (!product) {
     res.status(404).json({
