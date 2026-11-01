@@ -9,7 +9,12 @@ const VALID_PRODUCT = {
   slug: 'test-saree',
   name: 'Test Saree',
   price: 999,
-  images: ['https://picsum.photos/seed/test/800/1200'],
+  images: [
+    'https://picsum.photos/seed/test/800/1200',
+    'https://picsum.photos/seed/test2/800/1200',
+    'https://picsum.photos/seed/test3/800/1200',
+  ],
+  shareImage: 'https://picsum.photos/seed/test-share/1200/630',
   category: 'Saree',
   stock: 5,
   inStock: true,
@@ -222,8 +227,11 @@ describe('sale pricing (compareAtPrice)', () => {
 
   it('clears optional fields the admin form leaves empty on a full PUT', async () => {
     const token = await getAdminToken();
+    const { shareImage: _shareImage, ...withoutShareImage } = VALID_PRODUCT;
+    // A draft: a published product may not drop its share image
     const product = await Product.create({
       ...VALID_PRODUCT,
+      published: false,
       slug: 'clear-fields-saree',
       nameBn: 'শাড়ি',
       description: 'Old description',
@@ -233,7 +241,7 @@ describe('sale pricing (compareAtPrice)', () => {
     const res = await request(app)
       .put(`/api/products/${product._id}`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ ...VALID_PRODUCT, slug: 'clear-fields-saree' });
+      .send({ ...withoutShareImage, slug: 'clear-fields-saree' });
     expect(res.status).toBe(200);
     expect(res.body.data.nameBn).toBeUndefined();
     expect(res.body.data.description).toBeUndefined();
@@ -412,5 +420,76 @@ describe('publishing products', () => {
       .set(await auth())
       .send({ ...VALID_PRODUCT, slug: 'manage' });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('what a product needs to be published', () => {
+  const auth = async () => ({ Authorization: `Bearer ${await getAdminToken()}` });
+  const ONE_PHOTO = [VALID_PRODUCT.images[0]];
+  const { shareImage: _shareImage, ...NO_SHARE_IMAGE } = VALID_PRODUCT;
+
+  const post = async (body: object) => request(app).post('/api/products').set(await auth()).send(body);
+  const put = async (id: unknown, body: object) => request(app).put(`/api/products/${id}`).set(await auth()).send(body);
+
+  it('refuses to publish a new product with fewer than 3 photos', async () => {
+    const res = await post({ ...VALID_PRODUCT, slug: 'few-photos', images: VALID_PRODUCT.images.slice(0, 2) });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('at least 3');
+  });
+
+  it('does not count the same photo twice', async () => {
+    const res = await post({ ...VALID_PRODUCT, slug: 'same-photo', images: [ONE_PHOTO[0], ONE_PHOTO[0], ONE_PHOTO[0]] });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses to publish a new product with no share image', async () => {
+    const res = await post({ ...NO_SHARE_IMAGE, slug: 'no-share' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('share image');
+  });
+
+  it('applies the rule when the request leaves published out, because that publishes it', async () => {
+    const { published: _published, ...body } = { ...VALID_PRODUCT, slug: 'default-rule', images: ONE_PHOTO, published: true };
+    expect((await post(body)).status).toBe(400);
+  });
+
+  it('lets a draft have one photo and no share image', async () => {
+    const res = await post({ ...NO_SHARE_IMAGE, slug: 'thin-draft', images: ONE_PHOTO, published: false });
+    expect(res.status).toBe(201);
+  });
+
+  it('refuses to publish that draft until it has them', async () => {
+    const draft = await Product.create({ ...NO_SHARE_IMAGE, slug: 'thin-draft-2', images: ONE_PHOTO, published: false });
+    const body = { ...NO_SHARE_IMAGE, slug: 'thin-draft-2', images: ONE_PHOTO };
+
+    expect((await put(draft._id, { ...body, published: true })).status).toBe(400);
+    expect((await Product.findById(draft._id))?.published).toBe(false);
+
+    expect((await put(draft._id, { ...VALID_PRODUCT, slug: 'thin-draft-2', published: true })).status).toBe(200);
+  });
+
+  it('lets an older published product change its stock without new photos', async () => {
+    const old = await Product.create({ ...NO_SHARE_IMAGE, slug: 'old-thin', images: ONE_PHOTO });
+    const res = await put(old._id, { ...NO_SHARE_IMAGE, slug: 'old-thin', images: ONE_PHOTO, stock: 9 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.stock).toBe(9);
+  });
+
+  it('refuses a change of pictures that leaves a published product short', async () => {
+    const live = await Product.create({ ...VALID_PRODUCT, slug: 'live-full' });
+    const body = { ...VALID_PRODUCT, slug: 'live-full' };
+
+    expect((await put(live._id, { ...body, images: ONE_PHOTO })).status).toBe(400);
+    expect((await put(live._id, NO_SHARE_IMAGE)).status).toBe(400);
+  });
+
+  it('lets a published product be unpublished whatever it has', async () => {
+    const old = await Product.create({ ...NO_SHARE_IMAGE, slug: 'old-thin-2', images: ONE_PHOTO });
+    const res = await put(old._id, { ...NO_SHARE_IMAGE, slug: 'old-thin-2', images: ONE_PHOTO, published: false });
+    expect(res.status).toBe(200);
+  });
+
+  it('answers 404 for a product that does not exist', async () => {
+    expect((await put('000000000000000000000000', VALID_PRODUCT)).status).toBe(404);
   });
 });
