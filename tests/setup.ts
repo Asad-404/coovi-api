@@ -1,5 +1,5 @@
 import { afterAll } from 'vitest';
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import Admin from '../src/models/Admin';
@@ -10,8 +10,10 @@ process.env.JWT_SECRET = 'test-jwt-secret';
 process.env.NODE_ENV = 'test';
 
 // Vitest awaits this module (top-level await) before loading the test files,
-// so the in-memory DB is connected before any route touches the models
-const mongoServer = await MongoMemoryServer.create();
+// so the in-memory DB is connected before any route touches the models.
+// A one-member replica set, not a standalone server: order status changes run in a
+// transaction, and MongoDB only allows transactions on a replica set (Atlas always is one).
+const mongoServer = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } });
 process.env.MONGODB_URI = mongoServer.getUri('coovi-test');
 await mongoose.connect(process.env.MONGODB_URI);
 

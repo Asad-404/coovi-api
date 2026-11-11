@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { Types } from 'mongoose';
-import type { QueryFilter } from 'mongoose';
+import type { ClientSession, QueryFilter } from 'mongoose';
 import { z } from 'zod';
 import { actor, requireAdmin, requirePermission } from '../middleware/auth';
 import { orderLimiter, orderLookupLimiter, readLimiter } from '../middleware/rateLimiters';
@@ -566,6 +565,99 @@ const statusBodySchema = z.object({
   restock: z.boolean().optional()
 });
 
+// Thrown inside the status transaction to roll it back and answer 409
+class StatusChangeRefused extends Error {}
+
+interface StatusChangeInput {
+  id: string;
+  oldStatus: OrderStatus;
+  status: OrderStatus;
+  changes: Record<string, unknown>;
+  restock: boolean;
+  who: ReturnType<typeof actor>;
+  session: ClientSession;
+}
+
+// Runs inside the transaction PATCH /:id/status opens. Every write passes the session,
+// so they all commit together or not at all.
+async function applyStatusChange({ id, oldStatus, status, changes, restock, who, session }: StatusChangeInput) {
+  // Claim the transition: the filter only matches while the order is still in oldStatus,
+  // so two admins clicking at once can't both take (or both return) the stock — the
+  // second one gets a 409. The history entry is written in the same update, so a status
+  // change and its record can never disagree.
+  const order = await Order.findOneAndUpdate(
+    { _id: id, status: oldStatus },
+    {
+      $set: changes,
+      $push: { statusHistory: { from: oldStatus, to: status, ...who, at: new Date() } }
+    },
+    { returnDocument: 'after', session }
+  ).select('-__v');
+
+  if (!order) {
+    throw new StatusChangeRefused('This order was just changed by someone else — reload and try again');
+  }
+
+  // Confirming an order takes stock out of the shop. Each decrement both checks and
+  // writes: the filter matches only when enough stock exists, so stock never goes below
+  // zero. Pre-order lines take no stock. A line whose stock ran out since the order was
+  // placed (someone else bought the last piece) becomes a pre-order when the product
+  // allows it, instead of blocking the confirmation.
+  if (oldStatus === 'Pending' && status === 'Processing') {
+    const becamePreorder: { index: number; preorderDays: number }[] = [];
+
+    for (const [index, item] of order.items.entries()) {
+      if (item.preorder) continue;
+
+      const result = await Product.updateOne(
+        { _id: item.productId, stock: { $gte: item.quantity } },
+        { $inc: { stock: -item.quantity } },
+        { session }
+      );
+
+      if (result.matchedCount === 0) {
+        const product = await Product.findById(item.productId)
+          .select('name stock allowPreorder preorderDays')
+          .session(session);
+
+        if (product?.allowPreorder) {
+          becamePreorder.push({ index, preorderDays: product.preorderDays });
+          continue;
+        }
+
+        // Rolls back the claim and every decrement made so far
+        throw new StatusChangeRefused(
+          `Insufficient stock for "${product?.name ?? item.name}": only ${product?.stock ?? 0} left, order needs ${item.quantity}`
+        );
+      }
+    }
+
+    if (becamePreorder.length) {
+      const preorderChanges: Record<string, boolean | number> = {};
+      for (const { index, preorderDays } of becamePreorder) {
+        preorderChanges[`items.${index}.preorder`] = true;
+        preorderChanges[`items.${index}.preorderDays`] = preorderDays;
+        order.items[index].preorder = true;
+        order.items[index].preorderDays = preorderDays;
+      }
+      await Order.updateOne({ _id: id }, { $set: preorderChanges }, { session });
+    }
+  }
+
+  // Cancelling a confirmed order puts its stock back, and so does a refused parcel unless
+  // the admin said it can't be sold again. Every order that reaches Shipped went through
+  // Processing, so its stock was taken. Pre-order lines took none, so they give none back.
+  const returnsStock = (oldStatus === 'Processing' && status === 'Cancelled') || (status === 'Returned' && restock);
+  if (returnsStock) {
+    for (const item of order.items) {
+      if (item.preorder) continue;
+      await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } }, { session });
+    }
+  }
+
+  return order;
+}
+
 // PATCH /api/orders/:id/status - Update order status (Admin only - JWT required)
 router.patch('/:id/status', requireAdmin, requirePermission('orders.edit'), async (req: Request, res: Response): Promise<void> => {
   const { id } = req.params;
@@ -622,99 +714,23 @@ router.patch('/:id/status', requireAdmin, requirePermission('orders.edit'), asyn
     changes.restocked = restock;
   }
 
-  // Claim the transition atomically: the filter only matches while the order
-  // is still in oldStatus, so two admins clicking at once can't both take (or
-  // both return) the stock — the second one gets a 409.
-  // The history entry is written in the same update, so a status change and
-  // its record can never disagree.
-  const historyId = new Types.ObjectId();
-  const order = await Order.findOneAndUpdate(
-    { _id: id, status: oldStatus },
-    {
-      $set: changes,
-      $push: { statusHistory: { _id: historyId, from: oldStatus, to: status, ...actor(req), at: new Date() } }
-    },
-    { returnDocument: 'after' }
-  ).select('-__v');
-
-  if (!order) {
-    res.status(409).json({
-      success: false,
-      message: 'This order was just changed by someone else — reload and try again'
-    });
-    return;
-  }
-
-  // Confirming an order takes stock out of the shop. Each decrement is ONE
-  // atomic operation that both checks and writes: the filter matches only
-  // when enough stock exists, so two admins confirming overlapping orders
-  // can never drive stock below zero (a plain $inc could).
-  // Pre-order lines take no stock. A line whose stock ran out since the order
-  // was placed (someone else bought the last piece) becomes a pre-order when
-  // the product allows it, instead of blocking the confirmation.
-  if (oldStatus === 'Pending' && status === 'Processing') {
-    const taken: { productId: string; quantity: number }[] = [];
-    const becamePreorder: { index: number; preorderDays: number }[] = [];
-
-    for (const [index, item] of order.items.entries()) {
-      if (item.preorder) continue;
-
-      const result = await Product.updateOne(
-        { _id: item.productId, stock: { $gte: item.quantity } },
-        { $inc: { stock: -item.quantity } }
-      );
-
-      if (result.matchedCount === 0) {
-        const product = await Product.findById(item.productId).select('name stock allowPreorder preorderDays');
-
-        if (product?.allowPreorder) {
-          becamePreorder.push({ index, preorderDays: product.preorderDays });
-          continue;
-        }
-
-        // This item couldn't be taken — give back any stock taken earlier in
-        // the loop and release the claim so the order is left completely untouched
-        for (const t of taken) {
-          await Product.updateOne({ _id: t.productId }, { $inc: { stock: t.quantity } });
-        }
-        await Order.updateOne(
-          { _id: id, status },
-          { $set: { status: oldStatus }, $pull: { statusHistory: { _id: historyId } } }
-        );
-
-        res.status(409).json({
-          success: false,
-          message: `Insufficient stock for "${product?.name ?? item.name}": only ${product?.stock ?? 0} left, order needs ${item.quantity}`
-        });
-        return;
-      }
-
-      taken.push({ productId: String(item.productId), quantity: item.quantity });
+  // The claim, the stock changes and any lines turned into pre-orders are written in ONE
+  // MongoDB transaction, so a crash or a database error partway through leaves no half-done
+  // change (an order marked Processing whose stock was never taken, or stock taken for an
+  // order still Pending). Anything thrown inside rolls every write back. A write conflict
+  // with another admin's transaction is retried by Mongoose, and the retry then sees the
+  // new status and answers 409.
+  let order;
+  try {
+    order = await Order.db.transaction((session) =>
+      applyStatusChange({ id: String(id), oldStatus, status, changes, restock, who: actor(req), session })
+    );
+  } catch (error) {
+    if (error instanceof StatusChangeRefused) {
+      res.status(409).json({ success: false, message: error.message });
+      return;
     }
-
-    if (becamePreorder.length) {
-      const changes: Record<string, boolean | number> = {};
-      for (const { index, preorderDays } of becamePreorder) {
-        changes[`items.${index}.preorder`] = true;
-        changes[`items.${index}.preorderDays`] = preorderDays;
-        order.items[index].preorder = true;
-        order.items[index].preorderDays = preorderDays;
-      }
-      await Order.updateOne({ _id: id }, { $set: changes });
-    }
-  }
-
-  // Cancelling a confirmed order puts its stock back, and so does a refused
-  // parcel unless the admin said it can't be sold again. Every order that
-  // reaches Shipped went through Processing, so its stock was taken.
-  // Pre-order lines took none, so they give none back.
-  const returnsStock =
-    (oldStatus === 'Processing' && status === 'Cancelled') || (status === 'Returned' && restock);
-  if (returnsStock) {
-    for (const item of order.items) {
-      if (item.preorder) continue;
-      await Product.updateOne({ _id: item.productId }, { $inc: { stock: item.quantity } });
-    }
+    throw error;
   }
 
   res.json({
