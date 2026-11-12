@@ -95,14 +95,19 @@ const blocksFor = async (phones: string[]) => {
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   const { page, limit, search, sort, blocked } = listQuerySchema.parse(req.query);
 
-  const match: Record<string, unknown> = {};
+  // Both filters pick phones, never single orders: a search finds the phones that
+  // match by number or by any name they ordered under, and then every order from
+  // those phones is added up, so "Rina Begum" also counts the orders placed as "Rina B".
+  const phoneFilters: Record<string, unknown>[] = [];
   if (search) {
     const pattern = { $regex: escapeRegex(search), $options: 'i' };
-    match.$or = [{ phone: pattern }, { customerName: pattern }];
+    const phones = await Order.distinct('phone', { $or: [{ phone: pattern }, { customerName: pattern }] });
+    phoneFilters.push({ phone: { $in: phones } });
   }
   if (blocked === 'true') {
-    match.phone = { $in: await BlockedPhone.distinct('phone') };
+    phoneFilters.push({ phone: { $in: await BlockedPhone.distinct('phone') } });
   }
+  const match = phoneFilters.length ? { $and: phoneFilters } : {};
 
   const [result] = await Order.aggregate<{ rows: CustomerRow[]; total: { count: number }[] }>([
     { $match: match },

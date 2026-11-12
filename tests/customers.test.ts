@@ -77,6 +77,25 @@ describe('GET /api/customers', () => {
     expect((await asOwner(request(app).get('/api/customers?search=akter'))).body.data.map((c: { phone: string }) => c.phone)).toEqual([RINA]);
   });
 
+  it('a name search adds up every order from the matching phone, under any name', async () => {
+    const BEGUM = '01633333333';
+    await Order.collection.insertMany([
+      order(BEGUM, 'Rina Begum', 'Delivered', 1000, '2026-09-01'),
+      order(BEGUM, 'Rina Begum', 'Delivered', 1000, '2026-09-02'),
+      order(BEGUM, 'Rina Begum', 'Delivered', 1000, '2026-09-03'),
+      order(BEGUM, 'Rina B', 'Delivered', 800, '2026-09-04')
+    ]);
+
+    const res = await asOwner(request(app).get('/api/customers?search=Rina%20Begum'));
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(1);
+    expect(res.body.data).toHaveLength(1);
+    // The newest name is "Rina B", which doesn't match the search, but the phone does
+    expect(res.body.data[0]).toMatchObject({ phone: BEGUM, name: 'Rina B', orders: 4, delivered: 4, spent: 3800 });
+
+    await Order.deleteMany({ phone: BEGUM });
+  });
+
   it('leaves money out without money access', async () => {
     const res = await asViewer(request(app).get('/api/customers'));
     expect(res.status).toBe(200);
