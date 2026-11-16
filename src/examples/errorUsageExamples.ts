@@ -11,8 +11,8 @@ import {
   NotFoundError,
   BusinessError,
   DatabaseError,
-  AuthenticationError,
-  AuthorizationError
+  AuthorizationError,
+  ExternalServiceError
 } from '../errors';
 
 const router = Router();
@@ -20,9 +20,8 @@ const router = Router();
 // Example 1: Validation in route handler
 router.post('/users', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const correlationId = (req as any).correlationId;
+    const correlationId = (req as any).correlationId as string | undefined;
 
-    // Validate required fields
     if (!req.body.email) {
       throw new ValidationError('Email is required', {
         field: 'email',
@@ -40,18 +39,15 @@ router.post('/users', async (req: Request, res: Response, next: NextFunction) =>
       });
     }
 
-    // Check for existing user
     const existingUser = await findUserByEmail(req.body.email);
     if (existingUser) {
       throw new BusinessError('User with this email already exists', {
         operation: 'createUser',
         reason: 'duplicate_email',
-        email: req.body.email,
         correlationId
       });
     }
 
-    // Create user (wrapped in try-catch for DB errors)
     let user;
     try {
       user = await createUser(req.body);
@@ -64,33 +60,24 @@ router.post('/users', async (req: Request, res: Response, next: NextFunction) =>
       });
     }
 
-    res.status(201).json({
-      success: true,
-      data: user
-    });
+    res.status(201).json({ success: true, data: user });
   } catch (error) {
-    next(error); // Pass to error handler middleware
+    next(error);
   }
 });
 
 // Example 2: Not found error
 router.get('/users/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const correlationId = (req as any).correlationId;
-    const user = await findUserById(req.params.id);
+    const correlationId = (req as any).correlationId as string | undefined;
+    const id = req.params['id'] as string;
+    const user = await findUserById(id);
 
     if (!user) {
-      throw new NotFoundError('User not found', {
-        resource: 'user',
-        id: req.params.id,
-        correlationId
-      });
+      throw new NotFoundError('User not found', { resource: 'user', id, correlationId });
     }
 
-    res.json({
-      success: true,
-      data: user
-    });
+    res.json({ success: true, data: user });
   } catch (error) {
     next(error);
   }
@@ -99,34 +86,27 @@ router.get('/users/:id', async (req: Request, res: Response, next: NextFunction)
 // Example 3: Authorization check
 router.delete('/users/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const correlationId = (req as any).correlationId;
+    const correlationId = (req as any).correlationId as string | undefined;
     const currentUser = (req as any).admin;
+    const id = req.params['id'] as string;
 
-    // Check if user has permission
-    if (currentUser.role !== 'owner' && currentUser.id !== req.params.id) {
+    if (currentUser.role !== 'owner' && currentUser.id !== id) {
       throw new AuthorizationError('You do not have permission to delete this user', {
-        userId: currentUser.id,
+        userId: currentUser.id as string,
         resource: 'user',
         action: 'delete',
         correlationId
       });
     }
 
-    const user = await findUserById(req.params.id);
+    const user = await findUserById(id);
     if (!user) {
-      throw new NotFoundError('User not found', {
-        resource: 'user',
-        id: req.params.id,
-        correlationId
-      });
+      throw new NotFoundError('User not found', { resource: 'user', id, correlationId });
     }
 
-    await deleteUser(req.params.id);
+    await deleteUser(id);
 
-    res.json({
-      success: true,
-      message: 'User deleted successfully'
-    });
+    res.json({ success: true, message: 'User deleted successfully' });
   } catch (error) {
     next(error);
   }
@@ -135,47 +115,32 @@ router.delete('/users/:id', async (req: Request, res: Response, next: NextFuncti
 // Example 4: Business logic validation
 router.post('/orders', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const correlationId = (req as any).correlationId;
-    const { productId, quantity } = req.body;
+    const correlationId = (req as any).correlationId as string | undefined;
+    const { productId, quantity } = req.body as { productId: string; quantity: number };
 
-    // Get product
     const product = await findProductById(productId);
     if (!product) {
-      throw new NotFoundError('Product not found', {
-        resource: 'product',
-        id: productId,
-        correlationId
-      });
+      throw new NotFoundError('Product not found', { resource: 'product', id: productId, correlationId });
     }
 
-    // Check stock availability
     if (product.stock < quantity) {
       throw new BusinessError('Insufficient product stock', {
         operation: 'createOrder',
         reason: 'insufficient_stock',
-        productId,
-        available: product.stock,
-        requested: quantity,
         correlationId
       });
     }
 
-    // Check if product is active
     if (!product.active) {
       throw new BusinessError('Product is not available for purchase', {
         operation: 'createOrder',
         reason: 'product_inactive',
-        productId,
         correlationId
       });
     }
 
     const order = await createOrder(req.body);
-
-    res.status(201).json({
-      success: true,
-      data: order
-    });
+    res.status(201).json({ success: true, data: order });
   } catch (error) {
     next(error);
   }
@@ -184,8 +149,8 @@ router.post('/orders', async (req: Request, res: Response, next: NextFunction) =
 // Example 5: Wrapping database operations
 async function findUserById(id: string): Promise<any> {
   try {
-    // Your database call here
-    return null; // placeholder
+    void id; // placeholder — replace with real DB call
+    return null;
   } catch (error: any) {
     throw new DatabaseError('Failed to fetch user', {
       table: 'users',
@@ -197,52 +162,49 @@ async function findUserById(id: string): Promise<any> {
 }
 
 // Example 6: Handling external service errors
-import { ExternalServiceError } from '../errors';
-import axios from 'axios';
-
-async function sendSMS(phone: string, message: string, correlationId: string): Promise<void> {
+async function sendNotification(phone: string, text: string, correlationId?: string): Promise<void> {
+  const url = 'https://sms-gateway.example.com/send';
   try {
-    await axios.post('https://sms-gateway.example.com/send', {
-      phone,
-      message
-    }, {
+    const res = await fetch(url, {
+      method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.SMS_API_KEY}`,
-        'X-Correlation-ID': correlationId
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.SMS_API_KEY ?? ''}`,
+        ...(correlationId ? { 'X-Correlation-ID': correlationId } : {})
       },
-      timeout: 10000
+      body: JSON.stringify({ phone, text }),
+      signal: AbortSignal.timeout(10_000)
     });
-  } catch (error: any) {
-    if (error.response) {
+
+    if (!res.ok) {
       throw new ExternalServiceError('SMS gateway returned an error', {
         serviceName: 'SMSGateway',
         endpoint: '/send',
-        requestData: { phone, messageLength: message.length },
-        responseData: error.response.data,
-        statusCode: error.response.status,
-        correlationId
-      });
-    } else if (error.request) {
-      throw new ExternalServiceError('SMS gateway did not respond', {
-        serviceName: 'SMSGateway',
-        endpoint: '/send',
-        requestData: { phone, messageLength: message.length },
-        correlationId
-      });
-    } else {
-      throw new ExternalServiceError('Failed to send SMS request', {
-        serviceName: 'SMSGateway',
+        requestData: { phone, textLength: text.length },
+        responseData: await res.json().catch(() => null),
+        statusCode: res.status,
         correlationId
       });
     }
+  } catch (error: any) {
+    if (error instanceof ExternalServiceError) throw error;
+
+    throw new ExternalServiceError('Failed to reach SMS gateway', {
+      serviceName: 'SMSGateway',
+      endpoint: '/send',
+      requestData: { phone, textLength: text.length },
+      correlationId
+    });
   }
 }
 
-// Placeholder functions (replace with actual implementations)
-async function findUserByEmail(email: string): Promise<any> { return null; }
-async function createUser(data: any): Promise<any> { return {}; }
-async function deleteUser(id: string): Promise<void> { }
-async function findProductById(id: string): Promise<any> { return null; }
-async function createOrder(data: any): Promise<any> { return {}; }
+// Placeholder functions — replace with real implementations
+async function findUserByEmail(_email: string): Promise<any> { return null; }
+async function createUser(_data: any): Promise<any> { return {}; }
+async function deleteUser(_id: string): Promise<void> { /* no-op */ }
+async function findProductById(_id: string): Promise<any> { return null; }
+async function createOrder(_data: any): Promise<any> { return {}; }
 
+// Export so the notification helper is reachable and tsc treats every symbol as used
+export { sendNotification };
 export default router;

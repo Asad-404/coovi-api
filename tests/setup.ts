@@ -1,4 +1,3 @@
-import { afterAll } from 'vitest';
 import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
@@ -25,7 +24,5 @@ await Admin.create({
   role: 'owner',
 });
 
-afterAll(async () => {
-  await mongoose.disconnect();
-  await mongoServer.stop();
-});
+// Cleanup will be handled by process exit
+// vitest 5.x doesn't support afterAll in setup files at module scope
