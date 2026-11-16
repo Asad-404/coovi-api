@@ -12,6 +12,7 @@ import settingsRoutes from './routes/settings';
 import adminRoutes from './routes/admins';
 import statsRoutes from './routes/stats';
 import customerRoutes from './routes/customers';
+import { correlationMiddleware } from './middleware/correlation';
 import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
@@ -37,6 +38,7 @@ app.use(helmet());
 app.use(cors({ origin: corsOrigins }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(correlationMiddleware);
 
 // Routes
 app.get('/', (_req: Request, res: Response) => {
