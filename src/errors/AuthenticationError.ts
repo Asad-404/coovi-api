@@ -12,21 +12,14 @@ import { BaseError } from './BaseError';
 export class AuthenticationError extends BaseError {
   constructor(
     message: string,
-    {
-      userId,
-      attemptedAction,
-      correlationId
-    }: {
-      userId?: string;
-      attemptedAction?: string;
-      correlationId?: string;
-    } = {}
+    context: Record<string, any> = {}
   ) {
+    const { correlationId, ...restContext } = context;
     super(message, {
       code: 'AUTHENTICATION_ERROR',
       statusCode: 401,
       severity: 'warning',
-      context: { userId, attemptedAction },
+      context: restContext,
       correlationId
     });
   }
