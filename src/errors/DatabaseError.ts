@@ -12,27 +12,14 @@ import { BaseError } from './BaseError';
 export class DatabaseError extends BaseError {
   constructor(
     message: string,
-    {
-      query,
-      params,
-      table,
-      operation,
-      originalError,
-      correlationId
-    }: {
-      query?: string;
-      params?: any;
-      table?: string;
-      operation?: string;
-      originalError?: string;
-      correlationId?: string;
-    } = {}
+    context: Record<string, any> = {}
   ) {
+    const { correlationId, ...restContext } = context;
     super(message, {
       code: 'DATABASE_ERROR',
       statusCode: 500,
       severity: 'critical',
-      context: { query, params, table, operation, originalError },
+      context: restContext,
       correlationId
     });
   }

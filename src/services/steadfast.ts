@@ -15,6 +15,7 @@ export const steadfastTrackingUrl = (trackingCode: string): string =>
 export class SteadfastNotConfiguredError extends Error {}
 
 // Steadfast refused the request, timed out or could not be reached
+// Keep these custom error classes for backward compatibility with route handlers
 export class SteadfastError extends Error {}
 
 interface SteadfastConfig {
