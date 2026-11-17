@@ -31,7 +31,8 @@ describe('Global error handler (A-2)', () => {
       .send('{"email": ');
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.message).toContain('JSON');
+    expect(res.body.error.message).toContain('JSON');
+    expect(res.body.error.code).toBe('MALFORMED_JSON');
   });
 
   it('returns 400 for an invalid product id in PUT (was 500 — CastError)', async () => {
