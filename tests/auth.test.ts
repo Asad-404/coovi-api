@@ -27,7 +27,7 @@ describe('POST /api/auth/login', () => {
       .post('/api/auth/login')
       .send({ email: 'nobody@coovi.com', password: 'whatever' });
     expect(res.status).toBe(401);
-    expect(res.body.message).toBe('Invalid email or password');
+    expect(res.body.error.message).toBe('Invalid email or password');
   });
 
   it('returns 400 when fields are missing', async () => {
@@ -40,7 +40,7 @@ describe('POST /api/auth/login', () => {
       .post('/api/auth/login')
       .send({ email: TEST_ADMIN.email, password: { $ne: '' } });
     expect(res.status).toBe(400);
-    expect(res.body.message).toBe('Email and password are required');
+    expect(res.body.error.message).toBe('Email and password are required');
   });
 
   it('returns 400 when the email is not text', async () => {
@@ -88,7 +88,7 @@ describe('PATCH /api/auth/password', () => {
       .set('Authorization', `Bearer ${await token()}`)
       .send({ currentPassword: 'not-the-password', newPassword: 'another-pass-123' });
     expect(res.status).toBe(401);
-    expect(res.body.message).toBe('Current password is incorrect');
+    expect(res.body.error.message).toBe('Current password is incorrect');
   });
 
   it('rejects a short new password and unknown fields', async () => {

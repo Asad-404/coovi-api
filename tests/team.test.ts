@@ -104,7 +104,7 @@ describe('owner and staff roles', () => {
     ];
     for (const res of noAccess) {
       expect(res.status).toBe(403);
-      expect(res.body.message).toBe(NO_ACCESS);
+      expect(res.body.error.message).toBe(NO_ACCESS);
     }
     const ownerOnly = [
       await request(app).get('/api/admins').set(auth),
@@ -112,7 +112,7 @@ describe('owner and staff roles', () => {
     ];
     for (const res of ownerOnly) {
       expect(res.status).toBe(403);
-      expect(res.body.message).toBe(OWNER_ONLY);
+      expect(res.body.error.message).toBe(OWNER_ONLY);
     }
 
     // The owner gets past the role check on the same routes
@@ -201,7 +201,7 @@ describe('owner and staff roles', () => {
     ];
     for (const res of writes) {
       expect(res.status).toBe(403);
-      expect(res.body.message).toBe(NO_ACCESS);
+      expect(res.body.error.message).toBe(NO_ACCESS);
     }
   });
 
